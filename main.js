@@ -6,7 +6,7 @@ import {
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.9.0';
+const VERSION = 'v0.10.0';
 
 // ---------- Feste Szenenwerte ----------
 const params = new URLSearchParams(location.search);
@@ -17,7 +17,8 @@ const SCENE = {
   center: [0, 0, -5],          // Wasserebene 5 m vor dem Startpunkt, auf Augenhöhe
   half: 8.0,                   // Quad 16 × 16 m
   waterR: 3.0,                 // Umkreisradius des Behälters (Reflexionsrand)
-  sunR: 1.4,                   // Radius der Sonnenscheibe
+  sunR: 1.15,                  // Radius der Sonnenscheibe in Ruhe (wächst beim Summen bis +40 %)
+  fracR: 1.4,                  // Grundgröße der Fraktale
   depth: 1.0,                  // Sonne liegt 1 m hinter dem Wasser
   bump: 3.0,
   partExtent: 3.8,             // Corona-Texturen decken ±3,8 m ab
@@ -50,8 +51,8 @@ const SECTIONS = [
     fracCount: { label: 'Anzahl Ebenen', min: 1, max: 6, step: 1, def: 3 },
     fracBlend: { label: 'Ebenen-Mischmodus', options: [[0, 'Normal'], [1, 'Additiv'], [2, 'Screen'], [3, 'Difference'], [4, 'Aufhellen']], def: 0 },
     echoFade:  { label: 'Echo-Deckkraft', min: 0.1, max: 1, step: 0.05, def: 0.55 },
-    echoSat:   { label: 'Echo-Sättigung (+ pro Kopie)', min: 0, max: 1, step: 0.05, def: 0.35 },
-    echoHue:   { label: 'Echo-Farbversatz (pro Kopie)', min: -1, max: 1, step: 0.05, def: 0.2 },
+    echoSat:   { label: 'Echo-Sättigung (+ pro Abstand)', min: 0, max: 1, step: 0.05, def: 0.35 },
+    echoHue:   { label: 'Echo-Farbversatz (vorne/hinten gegenläufig)', min: -1, max: 1, step: 0.05, def: 0.2 },
     relief:    { label: 'Relief-Tiefe (m, 0 = aus)', min: 0, max: 1.5, step: 0.05, def: 0 },
     reliefSteps: { label: 'Relief-Qualität (Schritte)', min: 6, max: 48, step: 2, def: 16 },
     fracInner: { label: 'Helle Innenflächen', options: [[2, 'Struktur'], [1, 'Hohl'], [0, 'Hell']], def: 2 },
@@ -259,17 +260,23 @@ let sunScale = 1, sunVel = 0, sunWob = 0;
 let flow = 0, turb = 0, clock = 0, flyFlow = 0;
 let morph = 0, hue = 0, grainT = 0;
 
+// Fraktale atmen nur leicht mit (die Sonne wächst stärker)
+const fracBreath = () => 1 + (sunScale - 1) * 0.3;
+
 function updateSun(dt, level) {
-  const goal = 1 + 0.12 * level;
+  const goal = 1 + 0.4 * level;
   sunVel += ((goal - sunScale) * 5.0 - sunVel * 2.2) * dt;   // gedämpfte Feder
   sunScale += sunVel * dt;
-  const wobGoal = 0.006 + Math.abs(sunVel) * 0.25 + level * 0.012;
+  const wobGoal = 0.006 + Math.abs(sunVel) * 0.1 + level * 0.012;
   sunWob += (wobGoal - sunWob) * Math.min(dt * 2, 1);
 }
 function sunUniforms(u) {
   gl.uniform1f(u.uSunR, SCENE.sunR);
   gl.uniform1f(u.uSunScale, sunScale);
   gl.uniform1f(u.uSunWob, sunWob);
+  // Farbe/Helligkeit folgt dem (federnden) Wachstum: ruhig = rote Abendsonne, Summen = hell
+  const x = Math.min(Math.max((sunScale - 1) / 0.3, 0), 1);
+  gl.uniform1f(u.uSunHeat, x * x * (3 - 2 * x));
   gl.uniform1f(u.uClock, clock);
 }
 
@@ -282,19 +289,25 @@ function drawFractal() {
   gl.uniform1f(u.uType, S.fracType);
   gl.uniform1i(u.uIter, S.fracIter);
   gl.uniform1f(u.uExtent, SCENE.partExtent);
-  gl.uniform1f(u.uR, SCENE.sunR * S.fracZoom * sunScale);
+  gl.uniform1f(u.uR, SCENE.fracR * S.fracZoom * fracBreath());
   gl.uniform1f(u.uHue, hue);
   gl.uniform1f(u.uInner, S.fracInner);
   gl.bindVertexArray(fullscreen);
+  // Ebenen symmetrisch um die innerste: k < 0 = davor, k > 0 = dahinter.
+  // Die innerste hat volle Deckkraft; nach vorne und hinten nehmen Deckkraft ab und Sättigung zu.
+  const center = (fracCount - 1) / 2;
+  const evenShift = fracCount % 2 === 0 ? 0.5 : 0;   // bei gerader Anzahl sind die zwei mittleren "innen"
   for (let i = 0; i < fracCount; i++) {
+    const k = i - center;
+    const dist = Math.abs(k) - evenShift;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fracFbs[i]);
     gl.viewport(0, 0, FRAC_SIZE, FRAC_SIZE);
     // Echos: etwas früherer Zustand, etwas größer, blasser
-    gl.uniform1f(u.uMorph, morph - i * 0.9);
-    gl.uniform1f(u.uScale, SCENE.sunR * 0.75 * S.fracZoom * sunScale * (1 + i * 0.07));
-    gl.uniform1f(u.uFade, Math.pow(S.echoFade, i));
-    gl.uniform1f(u.uSat, 1 + S.echoSat * i);
-    gl.uniform1f(u.uHueOff, S.echoHue * i);
+    gl.uniform1f(u.uMorph, morph - k * 0.9);          // dahinter = früherer Zustand, davor = späterer
+    gl.uniform1f(u.uScale, SCENE.fracR * 0.75 * S.fracZoom * fracBreath() * (1 + k * 0.07));
+    gl.uniform1f(u.uFade, Math.pow(S.echoFade, dist));
+    gl.uniform1f(u.uSat, 1 + S.echoSat * dist);
+    gl.uniform1f(u.uHueOff, S.echoHue * k);            // vorne und hinten in entgegengesetzte Richtung
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 }
@@ -337,7 +350,8 @@ function drawCorona(dt, level) {
       gl.uniform1f(u.uSizeMul, S.coronaSize);
       gl.uniform1f(u.uNoise, 1 / S.coronaNoise);
       gl.uniform1f(u.uMode, fractalOn() ? 1 : 0);
-      gl.uniform1f(u.uFracR, SCENE.sunR * S.fracZoom * sunScale * 1.3);
+      gl.uniform1f(u.uFracR, SCENE.fracR * S.fracZoom * fracBreath() * 1.3);
+      gl.uniform1f(u.uFracMain, Math.floor((fracCount - 1) / 2));
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
       gl.uniform1i(u.uFrac, 0);
@@ -439,7 +453,7 @@ function drawScene(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uBlend, S.fracBlend);
   gl.uniform1f(u.uRelief, Math.min(S.relief, SCENE.depth - 0.05));   // nicht vor die Wasserebene
   gl.uniform1f(u.uReliefSteps, S.reliefSteps);
-  gl.uniform1f(u.uFracRad, SCENE.sunR * S.fracZoom * sunScale * 2.4);
+  gl.uniform1f(u.uFracRad, SCENE.fracR * S.fracZoom * fracBreath() * 2.4);
   gl.uniform1f(u.uGrain, S.bgGrain ? S.bgStrength : 0);
   gl.uniform1f(u.uGrainSize, S.bgSize);
   gl.uniform1f(u.uGrainT, grainT);

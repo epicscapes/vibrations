@@ -78,6 +78,7 @@ uniform float uSunR;
 uniform float uSunScale;   // Wachstum beim Summen (federnd nachgezogen)
 uniform float uSunWob;     // organische Randverformung
 uniform float uClock;      // Echtzeit in s
+uniform float uSunHeat;    // 0 = ruhig (rote Abendsonne), 1 = beim Summen voll hell
 
 // Radius der Sonne in Richtung p: Grundgröße * Wachstum * weich wabernder Rand
 float sunRadius(vec2 p) {
@@ -98,11 +99,14 @@ vec3 sunDisc(vec2 p, float R) {
   vec3 radii = R * vec3(1.008, 1.0, 0.992);
   vec3 soft  = R * vec3(0.022, 0.014, 0.010);
   vec3 mask  = 1.0 - smoothstep(radii - soft, radii + soft, vec3(d));
-  vec3 core = mix(vec3(1.0, 0.64, 0.26), vec3(0.97, 0.46, 0.13), pow(clamp(d / R, 0.0, 1.0), 2.5));
-  vec3 col = core * mask;
+  float rr = pow(clamp(d / R, 0.0, 1.0), 2.5);
+  // Ruhe: tiefrote, gedämpfte Abendsonne (wie über der Savanne); Summen: helles Orange-Gelb
+  vec3 calm = mix(vec3(0.86, 0.27, 0.07), vec3(0.70, 0.14, 0.04), rr);
+  vec3 hot  = mix(vec3(1.0, 0.64, 0.26), vec3(0.97, 0.46, 0.13), rr);
+  vec3 col = mix(calm, hot, uSunHeat) * mask;
   float e = max(d - R, 0.0);
-  col += vec3(0.55, 0.09, 0.02) * exp(-e / (R * 0.08)) * 0.3;   // schmaler, gesättigter Saum
-  col += vec3(0.22, 0.03, 0.01) * exp(-e / (R * 1.2));          // weiter Halo
+  col += mix(vec3(0.45, 0.05, 0.012), vec3(0.55, 0.09, 0.02), uSunHeat) * exp(-e / (R * 0.08)) * 0.3;  // schmaler Saum
+  col += mix(vec3(0.15, 0.018, 0.006), vec3(0.22, 0.03, 0.01), uSunHeat) * exp(-e / (R * 1.2));       // weiter Halo
   return col;
 }`;
 
@@ -296,20 +300,21 @@ vec2 fracUV(vec2 p) { return p / (2.0 * uExtent) + 0.5; }
 // Relief per Parallax-Occlusion-Mapping: Helligkeit des Fraktals = Höhe (hell = näher).
 // Der gebrochene Strahl wird schrittweise durch die Höhenschicht verfolgt, bis er die Oberfläche trifft.
 // Läuft nur, wenn aktiviert und der Strahl in der Nähe des Fraktals ist.
-vec2 reliefHit(vec3 rr, vec2 ps, out float shade) {
+vec2 reliefHit(vec3 rr, vec2 ps, float base, float li, out float shade) {
   shade = 1.0;
   if (uRelief <= 0.0 || length(ps) > uFracRad) return ps;
   float iz = 1.0 / max(-rr.z, 0.05);
-  float top = uDepth - uRelief;                 // vorderste mögliche Tiefe
+  float rel = min(uRelief, base - 0.05);
+  float top = base - rel;                       // vorderste mögliche Tiefe
   float n = uReliefSteps;
   float prevD = top, prevGap = -1.0;
   vec2 hit = ps;
   for (int i = 0; i <= 64; i++) {
     if (float(i) > n) break;
-    float d = top + uRelief * float(i) / n;     // aktuelle Strahltiefe
+    float d = top + rel * float(i) / n;         // aktuelle Strahltiefe
     vec2 p = vLocal + rr.xy * d * iz;
-    float h = texture(uFracArr, vec3(fracUV(p), 0.0)).a;
-    float gap = d - (uDepth - h * uRelief);     // >= 0: Strahl ist hinter der Oberfläche
+    float h = texture(uFracArr, vec3(fracUV(p), li)).a;
+    float gap = d - (base - h * rel);           // >= 0: Strahl ist hinter der Oberfläche
     if (gap >= 0.0) {
       float k = prevGap < 0.0 ? clamp(-prevGap / (gap - prevGap), 0.0, 1.0) : 0.0;
       d = mix(prevD, d, k);
@@ -320,16 +325,16 @@ vec2 reliefHit(vec3 rr, vec2 ps, out float shade) {
   }
   // einfache Beleuchtung aus der Höhen-Steigung
   float e = 2.0 * uExtent / float(textureSize(uFracArr, 0).x) * 2.0;
-  float hx = texture(uFracArr, vec3(fracUV(hit + vec2(e, 0.0)), 0.0)).a - texture(uFracArr, vec3(fracUV(hit - vec2(e, 0.0)), 0.0)).a;
-  float hy = texture(uFracArr, vec3(fracUV(hit + vec2(0.0, e)), 0.0)).a - texture(uFracArr, vec3(fracUV(hit - vec2(0.0, e)), 0.0)).a;
-  vec3 nrm = normalize(vec3(-hx, -hy, e * 4.0 / max(uRelief, 0.01)));
+  float hx = texture(uFracArr, vec3(fracUV(hit + vec2(e, 0.0)), li)).a - texture(uFracArr, vec3(fracUV(hit - vec2(e, 0.0)), li)).a;
+  float hy = texture(uFracArr, vec3(fracUV(hit + vec2(0.0, e)), li)).a - texture(uFracArr, vec3(fracUV(hit - vec2(0.0, e)), li)).a;
+  vec3 nrm = normalize(vec3(-hx, -hy, e * 4.0 / max(rel, 0.01)));
   shade = 0.7 + 0.6 * max(dot(nrm, normalize(vec3(-0.5, 0.7, 0.6))), 0.0);
   return hit;
 }
 
 // Animiertes Korn: Zellen driften langsam und funkeln weich (kein hartes Flackern)
 float grainLayer(vec2 p, float k) {
-  vec2 q = p / uSunR * 245.0 / uGrainSize * (1.0 + 0.15 * k);
+  vec2 q = p * 175.0 / uGrainSize * (1.0 + 0.15 * k);
   q += uGrainT * vec2(2.0 + 1.5 * k, 1.2 - 2.0 * k);
   vec2 cell = floor(q);
   float h  = hash(cell + k * 37.0);
@@ -370,22 +375,30 @@ void main() {
     col = sun(ps);
     cover = sunCover(ps);
   } else {
-    // Fraktal: drei Ebenen, von hinten nach vorne (vormultipliziert)
-    // weiter Glow wie bei der Sonne, im aktuellen Farbton
-    col = ground(ps) + hueShift(vec3(0.22, 0.03, 0.01), uHue) * exp(-length(ps) / (uSunR * 1.2));
-    // Echos von hinten nach vorne
-    for (int i = 5; i >= 1; i--) {
+    // Fraktal: weiter Glow wie bei der Sonne, im aktuellen Farbton
+    col = ground(ps) + hueShift(vec3(0.22, 0.03, 0.01), uHue) * exp(-length(ps) / (1.4 * 1.2));
+    // Ebenen symmetrisch um die innerste verteilt (Index 0 = vorne), von hinten nach vorne komponiert.
+    // Die innerste Ebene ist die Hauptform (volle Deckkraft, Relief, verdeckt die hintere Corona).
+    float center = (uFracCount - 1.0) * 0.5;
+    int mainIdx = int(floor(center));
+    float iz = 1.0 / max(-rr.z, 0.05);
+    cover = 0.0;
+    for (int i = 5; i >= 0; i--) {
       if (float(i) >= uFracCount) continue;
-      float d = uDepth + uFracOff * float(i);
-      vec2 pl = vLocal + rr.xy * (d / max(-rr.z, 0.05));
-      col = blendLayer(col, texture(uFracArr, vec3(fracUV(pl), float(i))));
+      float d = max(uDepth + (float(i) - center) * uFracOff, 0.1);
+      vec2 pl = vLocal + rr.xy * (d * iz);
+      vec4 f;
+      if (i == mainIdx) {
+        float shade;
+        pl = reliefHit(rr, pl, d, float(i), shade);
+        f = texture(uFracArr, vec3(fracUV(pl), float(i)));
+        f.rgb *= shade;
+        cover = f.a;
+      } else {
+        f = texture(uFracArr, vec3(fracUV(pl), float(i)));
+      }
+      col = blendLayer(col, f);
     }
-    float shade;
-    vec2 ph = reliefHit(rr, ps, shade);
-    vec4 f0 = texture(uFracArr, vec3(fracUV(ph), 0.0));
-    f0.rgb *= shade;
-    col = blendLayer(col, f0);
-    cover = f0.a;
   }
 
   // Hintergrund-Korn in bis zu drei Tiefenebenen (hintere Ebenen werden vom Objekt verdeckt)
@@ -439,7 +452,8 @@ uniform float uIdOffset; // trennt die Partikel der drei Ebenen
 uniform float uSizeMul;  // Größe aus dem UI
 uniform float uNoise;    // Frequenz-Faktor des Emissions-Noise (größer = feiner)
 uniform float uMode;     // 0 = Sonne, 1 = Fraktal
-uniform highp sampler2DArray uFrac; // Fraktal-Ebenen (vordere = 0) -> Geburtsort und Farbe
+uniform highp sampler2DArray uFrac; // Fraktal-Ebenen -> Geburtsort und Farbe (aus der innersten)
+uniform float uFracMain;  // Index der innersten Ebene
 uniform float uFracR;    // Radius, in dem Fraktal-Partikel entstehen können
 out float vA;
 out vec3 vCol;
@@ -482,7 +496,7 @@ void main() {
   } else {
     // Fraktal: zufälliger Ort, sichtbar nur, wo das Fraktal hell ist; Farbe von dort
     r0 = sqrt(h1(id * 4.13 + cycle * 1.9)) * uFracR;
-    vec4 f = textureLod(uFrac, vec3(dir * r0 / (2.0 * uExtent) + 0.5, 0.0), 0.0);
+    vec4 f = textureLod(uFrac, vec3(dir * r0 / (2.0 * uExtent) + 0.5, uFracMain), 0.0);
     float a = f.a;
     birth = f.rgb / max(a, 1e-3);
     dens = smoothstep(0.2, 0.6, a);
