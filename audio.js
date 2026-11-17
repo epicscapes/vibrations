@@ -71,7 +71,7 @@ export class HumDetector {
 // Stimmeffekte. Signalfluss:
 //   Mikro -> Gate (öffnet nur beim Summen) -> Sends -> [Hall | Echo | Grain | Shimmer] -> Master -> Kompressor -> Ausgang
 //   Obertöne: Sinus-Oszillatoren folgen der erkannten Tonhöhe -> Hall + Master
-// Es wird nur das Effektsignal ausgegeben (kein trockenes Signal), deine echte Stimme hörst du ja selbst.
+// Zusätzlich ein regelbarer Anteil der trockenen Stimme (Gate -> Dry -> Kompressor).
 // ---------------------------------------------------------------------------
 
 export const EFFECTS = {
@@ -122,6 +122,10 @@ export class VoiceFX {
     hp.type = 'highpass'; hp.frequency.value = 70;
     this.gate = g(0);
     this.source.connect(hp).connect(this.gate);
+
+    // Eigene Stimme ohne Effekte, separat regelbar (am Effekt-Master vorbei)
+    this.dry = g(0);
+    this.gate.connect(this.dry).connect(this.comp);
 
     // Hall (Faltungshall mit generierter Impulsantwort, ~7 s)
     this.reverb = ctx.createConvolver();
@@ -191,6 +195,10 @@ export class VoiceFX {
     if (name === 'harmony') return;             // Pegel wird in update() gesteuert
     const s = this.sends && this.sends[name];
     if (s) s.gain.setTargetAtTime(on ? 1 : 0, this.ctx.currentTime, 0.1);
+  }
+
+  setDry(v) {
+    if (this.dry) this.dry.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05);
   }
 
   setVolume(v) {

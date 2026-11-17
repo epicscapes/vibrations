@@ -22,15 +22,18 @@ Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Qu
 - Nutzer steht/sitzt still; keine künstliche Fortbewegung.
 - Performance: Quest 3 soll stabil 72–90 fps halten. Wenige Lichter, sparsame Partikel, keine Post-Processing-Ketten.
 
-## Aktueller Stand (v0.3.0) – Szene „Sonne & Wasser“
-- Look nach Referenz: orange Sonnenscheibe wie eine Projektion, chromatischer Rand (gelb → orange → rot), gesättigter roter Glow, dunkelroter Grund mit feinem Korn.
-- Davor eine transparente, brechende Wasserebene (Quad 8 × 8 m, 2,5 m vor dem Nutzer). Die Sonne liegt 0,5 m dahinter und wird per Raytracing-Brechung im Shader verzerrt (inkl. Parallaxe).
+## Aktueller Stand (v0.4.0) – Szene „Sonne & Wasser“
+- Look nach Referenz: orange Sonnenscheibe wie eine Projektion, schmaler chromatischer Rand (gelb → orange → rot), gesättigter roter Glow, dunkelroter Grund mit feinem Korn.
+- Davor eine transparente, brechende Wasserebene (Quad 16 × 16 m, 5 m vor dem Nutzer, Wasserbehälter-Radius 3 m, Sonnenradius 1,4 m). Die Sonne liegt 1 m dahinter und wird per Raytracing-Brechung im Shader verzerrt (inkl. Parallaxe).
 - Wellen: 2D-Wellengleichung auf der GPU (512², RG16F Ping-Pong, 480 Schritte/s). Anregung im Zentrum, Rand reflektiert.
   Rand leicht sechszählig gewellt (`sym`, `lobe`) → blütenartige Interferenzmuster wie Cymatics.
 - Summen ins Mikro regt die Wellen an: Lautstärke = Amplitude, Tonhöhe (Autokorrelation 70–500 Hz) = Wellenlänge.
-- Sonnenwind: 4000 zustandslose GPU-Partikel strömen turbulent von der Sonne weg, Tempo und Turbulenz steigen mit der Lautstärke.
-  Sie werden in eine eigene Textur (Koordinaten der Sonnenebene, mit Schweifen) gezeichnet und liegen damit hinter dem Wasser und werden mit gebrochen.
-- Stimmeffekte (nur Effektsignal, kein trockenes Signal; Gate öffnet nur beim Summen; Kompressor am Ausgang):
+- Sonnenwind: 6000 zustandslose GPU-Partikel strömen turbulent von der Sonne weg, Tempo und Turbulenz steigen mit der Lautstärke.
+  Jede Lebensrunde neuer Geburtsort; Emission entlang des Randes über langsam wanderndes Noise -> dichtere und leere Bereiche.
+  Bei der Geburt haben sie die Farbe der Sonne an dieser Stelle (gemeinsame GLSL-Funktion `sunDisc`) und glühen ins Rot aus.
+  Gezeichnet in eine eigene Textur (Sonnenebene, vormultipliziert mit Alpha, Schweife) und "über" die Sonne komponiert, nicht additiv –
+  so verschmelzen sie am Rand mit der Scheibe. Liegen hinter dem Wasser und werden mit gebrochen.
+- Stimmeffekte (Gate öffnet nur beim Summen; Kompressor am Ausgang; Regler „Eigene Stimme“ mischt die trockene Stimme dazu, Standard 0):
   Hall (Faltungshall, ~7 s), Echo (Ping-Pong), Grain Delay, Shimmer (Körner eine Oktave höher in den Hall), Obertöne (Sinus-Unteroktave/Quinte/Oktave folgen der Tonhöhe).
   Schalter + Effekt-Lautstärke in der Browser-UI, Einstellungen in localStorage gespeichert.
 - Feedback-Risiko: Quest-Lautsprecher + Mikro ohne Echounterdrückung. Bei Pfeifen Effekt-Lautstärke senken oder Kopfhörer nutzen.

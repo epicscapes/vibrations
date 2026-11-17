@@ -3,7 +3,7 @@ import { simVS, simFS, sceneVS, sceneFS, partVS, partFS, fadeFS } from './shader
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.3.0';
+const VERSION = 'v0.4.0';
 
 // ---------- Einstellungen ----------
 const params = new URLSearchParams(location.search);
@@ -13,14 +13,14 @@ const SIM_RATE = 480;          // Simulationsschritte pro Sekunde
 const WAVE_K = 0.25;           // c² -> 0.5 Texel pro Schritt
 const DAMP = 0.9993;          // geringe Dämpfung -> Wellen erreichen den Rand und reflektieren
 const SCENE = {
-  center: [0, 0, -2.5],        // Wasserebene 2,5 m vor dem Startpunkt, auf Augenhöhe
-  half: 4.0,                   // Quad 8 × 8 m
-  waterR: 1.5,                 // Radius des Behälters (Reflexionsrand)
-  sunR: 0.7,                   // Radius der Sonnenscheibe
-  depth: 0.5,                  // Sonne liegt 50 cm hinter dem Wasser
+  center: [0, 0, -5],          // Wasserebene 5 m vor dem Startpunkt, auf Augenhöhe
+  half: 8.0,                   // Quad 16 × 16 m
+  waterR: 3.0,                 // Radius des Behälters (Reflexionsrand)
+  sunR: 1.4,                   // Radius der Sonnenscheibe
+  depth: 1.0,                  // Sonne liegt 1 m hinter dem Wasser
   bump: 3.0,
-  particles: 4000,             // Sonnenwind-Partikel
-  partExtent: 2.2,             // Partikeltextur deckt ±2,2 m der Sonnenebene ab
+  particles: 6000,             // Sonnenwind-Partikel
+  partExtent: 3.6,             // Partikeltextur deckt ±3,6 m der Sonnenebene ab
   sym: 6,                      // Symmetrie der Interferenzmuster
   lobe: 0.08,
 };
@@ -32,6 +32,7 @@ const ui = {
   vr: document.getElementById('vr'),
   fx: document.getElementById('fx'),
   volume: document.getElementById('volume'),
+  dry: document.getElementById('dry'),
 };
 ui.version.textContent = `Vibrations ${VERSION}`;
 
@@ -126,10 +127,11 @@ function simStep(drive) {
 }
 
 // ---------- Sonnenwind ----------
-let flow = 0, turb = 0;
+let flow = 0, turb = 0, clock = 0;
 function drawParticles(dt, level) {
-  flow += dt * (0.25 + level * 2.5);
-  turb += dt * (0.3 + level * 1.5);
+  flow += dt * (0.6 + level * 2.5);
+  turb += dt * (0.4 + level * 1.5);
+  clock += dt;
 
   gl.bindFramebuffer(gl.FRAMEBUFFER, partTarget.fb);
   gl.viewport(0, 0, PART_SIZE, PART_SIZE);
@@ -149,6 +151,7 @@ function drawParticles(dt, level) {
   const u = partProg.u;
   gl.uniform1f(u.uFlow, flow);
   gl.uniform1f(u.uTurb, turb);
+  gl.uniform1f(u.uClock, clock);
   gl.uniform1f(u.uLevel, level);
   gl.uniform1f(u.uSunR, SCENE.sunR);
   gl.uniform1f(u.uExtent, SCENE.partExtent);
@@ -269,6 +272,11 @@ ui.volume.addEventListener('input', () => {
   save('fx.volume', +ui.volume.value);
   if (fx) fx.setVolume(+ui.volume.value);
 });
+ui.dry.value = load('fx.dry', 0);
+ui.dry.addEventListener('input', () => {
+  save('fx.dry', +ui.dry.value);
+  if (fx) fx.setDry(+ui.dry.value);
+});
 
 ui.mic.addEventListener('click', async () => {
   try {
@@ -277,6 +285,7 @@ ui.mic.addEventListener('click', async () => {
     Object.assign(fx.enabled, fxState);
     await fx.init();
     fx.setVolume(+ui.volume.value);
+    fx.setDry(+ui.dry.value);
     ui.mic.textContent = '🎤 Mikrofon aktiv';
     ui.mic.disabled = true;
   } catch (e) {

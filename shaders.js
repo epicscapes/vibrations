@@ -56,6 +56,24 @@ void main() {
   o = vec4(clamp(n, -4.0, 4.0), h, 0.0, 1.0);
 }`;
 
+
+// Farbe der Sonnenscheibe inkl. Saum und Glow (ohne Grund/Korn) – wird von Szene und Partikeln benutzt
+const SUN_GLSL = `
+vec3 sunDisc(vec2 p, float R) {
+  float d = length(p);
+  // Kanalweise leicht unterschiedliche Radien/Weichheit -> schmaler Farbsaum
+  // (Blau verschwindet zuerst, dann Grün, Rot reicht am weitesten -> gelb -> orange -> rot)
+  vec3 radii = R * vec3(1.008, 1.0, 0.992);
+  vec3 soft  = R * vec3(0.022, 0.014, 0.010);
+  vec3 mask  = 1.0 - smoothstep(radii - soft, radii + soft, vec3(d));
+  vec3 core = mix(vec3(1.0, 0.64, 0.26), vec3(0.97, 0.46, 0.13), pow(clamp(d / R, 0.0, 1.0), 2.5));
+  vec3 col = core * mask;
+  float e = max(d - R, 0.0);
+  col += vec3(0.55, 0.09, 0.02) * exp(-e / (R * 0.08)) * 0.3;   // schmaler, gesättigter Saum
+  col += vec3(0.22, 0.03, 0.01) * exp(-e / (R * 1.2));          // weiter Halo
+  return col;
+}`;
+
 // ---------- Szene ----------
 // Ein großes Quad im Raum = die transparente Wasserebene.
 // Die Sonnenscheibe liegt "dahinter" auf einer virtuellen Ebene (uDepth Meter tiefer).
@@ -98,29 +116,12 @@ float hash(vec2 p) {
   return fract(p.x * p.y);
 }
 
-// Die "projizierte Sonne": orange Scheibe, chromatischer Rand, gesättigter roter Glow
+// Die "projizierte Sonne" + dunkelroter Grund + feines Korn
+${SUN_GLSL}
 vec3 sun(vec2 p) {
-  float d = length(p);
-  float R = uSunR;
-
-  // Kanalweise leicht unterschiedliche Radien/Weichheit -> Farbsaum
-  // (Blau verschwindet zuerst, dann Grün, Rot reicht am weitesten -> gelb -> orange -> rot)
-  vec3 radii = R * vec3(1.02, 1.0, 0.98);
-  vec3 soft  = R * vec3(0.05, 0.03, 0.02);
-  vec3 mask  = 1.0 - smoothstep(radii - soft, radii + soft, vec3(d));
-
-  vec3 core = mix(vec3(1.0, 0.64, 0.26), vec3(0.97, 0.46, 0.13), pow(clamp(d / R, 0.0, 1.0), 2.5));
-  vec3 col = core * mask;
-
-  float e = max(d - R, 0.0);
-  col += vec3(0.55, 0.09, 0.02) * exp(-e / (R * 0.25)) * 0.35;  // gesättigter Saum
-  col += vec3(0.22, 0.03, 0.01) * exp(-e / (R * 1.2));          // weiter Halo
-
-  // dunkelroter Grund
+  vec3 col = sunDisc(p, uSunR);
   col += vec3(0.07, 0.012, 0.006);
-
-  // feines, statisches Korn (wie auf der Referenz)
-  col += (hash(floor(p * 350.0)) - 0.5) * 0.03;
+  col += (hash(floor(p / uSunR * 245.0)) - 0.5) * 0.03;   // Korn relativ zur Sonnengröße
   return col;
 }
 
@@ -141,7 +142,10 @@ void main() {
   vec2 ps  = vLocal + rr.xy * t;
 
   vec3 col = sun(ps);
-  col += texture(uPart, ps / (2.0 * uExtent) + 0.5).rgb;
+  // Partikel liegen "über" der Sonne (vormultipliziert), nicht additiv:
+  // an ihrem Entstehungsort haben sie die Farbe der Sonne und verschmelzen mit ihr.
+  vec4 part = texture(uPart, ps / (2.0 * uExtent) + 0.5);
+  col = col * (1.0 - min(part.a, 1.0)) + part.rgb;
 
   // --- Schattierung der Wellen ---
   float slope = length(grad);
@@ -166,6 +170,7 @@ void main() {
 export const partVS = `#version 300 es
 uniform float uFlow;     // integrierte Flusszeit (Tempo ~ Lautstärke)
 uniform float uTurb;     // integrierte Turbulenzzeit
+uniform float uClock;    // Echtzeit in s (für das langsam wandernde Emissions-Noise)
 uniform float uLevel;    // aktuelle Lautstärke 0..1
 uniform float uSunR;
 uniform float uExtent;   // halbe Kantenlänge der Partikeltextur (m)
@@ -174,17 +179,34 @@ out float vA;
 out vec3 vCol;
 
 float h1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+${SUN_GLSL}
+
+// Emissionsdichte entlang des Sonnenrandes: langsam wanderndes, periodisches Noise
+float emission(float a, float t) {
+  float n = sin(a * 2.0 + t * 0.21 + 1.3) * 0.5
+          + sin(a * 3.0 - t * 0.17 + 4.1) * 0.35
+          + sin(a * 5.0 + t * 0.29 + 2.2) * 0.25
+          + sin(a * 9.0 - t * 0.37 + 0.7) * 0.15;
+  return n / 1.25 * 0.5 + 0.5;    // grob 0..1
+}
 
 void main() {
   float id = float(gl_VertexID);
-  float s1 = h1(id), s2 = h1(id + 17.3), s3 = h1(id + 41.7), s4 = h1(id + 73.1);
+  float s1 = h1(id), s2 = h1(id + 17.3);
 
-  float speed = 0.5 + s2;
-  float prog = fract(s1 + uFlow * speed * 0.1);       // 0 = an der Sonne, 1 = verglüht
+  float speed = 0.6 + 0.8 * s2;
+  float life = s1 + uFlow * speed * 0.25;
+  float prog = fract(life);                        // 0 = Geburt, 1 = verglüht
+  float cycle = floor(life);                       // jede neue Lebensrunde: neuer Geburtsort
+  float s3 = h1(id * 1.37 + cycle * 7.71);
+  float s4 = h1(id * 2.11 + cycle * 3.17 + 5.0);
 
   float ang = s3 * 6.2831853;
-  float r0 = uSunR * (0.9 + 0.1 * s4);
-  float dist = pow(prog, 1.3) * uSunR * 2.0 * (0.5 + 0.5 * s4);
+  // Dichtere und leere Bereiche: Partikel an "dünnen" Stellen bleiben unsichtbar
+  float dens = smoothstep(0.4, 0.75, emission(ang, uClock));
+
+  float r0 = uSunR * (0.86 + 0.13 * s4);           // Geburt knapp innerhalb des Randes
+  float dist = pow(prog, 1.2) * uSunR * 1.4 * (0.5 + 0.5 * s4);
   float r = r0 + dist;
 
   // Turbulenz: seitliches Verwirbeln, wächst mit Abstand und Lautstärke
@@ -192,16 +214,17 @@ void main() {
   float wob = sin(d * 7.0 + uTurb * 0.9 + s2 * 20.0) * 0.6
             + sin(d * 19.0 - uTurb * 1.7 + s3 * 30.0) * 0.3
             + sin(d * 41.0 + uTurb * 2.3 + s1 * 50.0) * 0.12;
-  ang += wob * d * 0.25 * (0.5 + uLevel);
-  // leichte Spirale
-  ang += d * 0.15;
+  ang += wob * d * 0.25 * (0.5 + uLevel) + d * 0.15;
 
   vec2 p = vec2(cos(ang), sin(ang)) * r;
   gl_Position = vec4(p / uExtent, 0.0, 1.0);
-  gl_PointSize = mix(0.014, 0.006, prog) * uPx;
+  gl_PointSize = mix(0.02, 0.009, prog) * uSunR * uPx;
 
-  vA = smoothstep(0.0, 0.06, prog) * (1.0 - prog) * (0.35 + 0.65 * s4) * (0.45 + 0.9 * uLevel);
-  vCol = mix(vec3(1.0, 0.78, 0.4), vec3(0.85, 0.18, 0.04), smoothstep(0.0, 0.7, prog));
+  // Farbe = Farbe der Sonne am Geburtsort, glüht dann langsam ins Rot aus
+  vec3 birth = sunDisc(vec2(cos(s3 * 6.2831853), sin(s3 * 6.2831853)) * r0, uSunR);
+  vCol = mix(birth, birth * vec3(0.85, 0.3, 0.15), smoothstep(0.0, 0.9, prog));
+
+  vA = dens * smoothstep(0.0, 0.05, prog) * (1.0 - prog) * (0.3 + 0.7 * s4) * (0.7 + 0.6 * uLevel);
 }`;
 
 export const partFS = `#version 300 es
@@ -211,7 +234,8 @@ in vec3 vCol;
 out vec4 o;
 void main() {
   float m = max(1.0 - length(gl_PointCoord * 2.0 - 1.0), 0.0);
-  o = vec4(vCol * vA * m * m, 1.0);
+  float a = vA * m * m;
+  o = vec4(vCol * a, a);
 }`;
 
 // Blendet die Partikeltextur pro Frame etwas aus -> weiche Schweife
