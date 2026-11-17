@@ -6,7 +6,7 @@ import {
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.7.0';
+const VERSION = 'v0.8.0';
 
 // ---------- Feste Szenenwerte ----------
 const params = new URLSearchParams(location.search);
@@ -41,13 +41,22 @@ const SECTIONS = [
   }, effects: true },
   { title: 'Shapes', items: {
     centerObj: { label: 'Objekt', options: [[0, 'Sonne'], [1, 'Fraktal']], def: 0 },
-    fracType:  { label: 'Fraktal-Algorithmus', options: [[0, 'Julia'], [1, 'Burning Ship'], [2, 'Tricorn'], [3, 'Kaliset'], [4, 'Mandala']], def: 0 },
+    fracType:  { label: 'Fraktal-Algorithmus', options: [[0, 'Julia'], [1, 'Phoenix'], [2, 'Tricorn'], [3, 'Kaliset'], [4, 'Mandala']], def: 0 },
     fracZoom:  { label: 'Fraktal-Größe', min: 0.5, max: 2, step: 0.05, def: 1 },
     fracDepth: { label: 'Fraktal-Tiefe (m)', min: 0, max: 1.5, step: 0.05, def: 0.45 },
     fracSpeed: { label: 'Entwicklungs-Tempo', min: 0, max: 3, step: 0.1, def: 1 },
     fracIter:  { label: 'Detail (Iterationen)', min: 24, max: 192, step: 8, def: 80 },
     fracRes:   { label: 'Fraktal-Auflösung', options: [[512, '512'], [768, '768'], [1024, '1024']], def: 768 },
+    fracInner: { label: 'Helle Innenflächen', options: [[2, 'Struktur'], [1, 'Hohl'], [0, 'Hell']], def: 2 },
     hueShift:  { label: 'Hue-Shift nach Tonhöhe', min: 0, max: 1, step: 0.05, def: 1 },
+  }},
+  { title: 'Hintergrund', items: {
+    bgGrain:  { label: 'Korn an', toggle: true, def: true },
+    bgStrength: { label: 'Stärke', min: 0, max: 0.12, step: 0.005, def: 0.03 },
+    bgSize:   { label: 'Korngröße', min: 0.3, max: 4, step: 0.1, def: 1 },
+    bgSpeed:  { label: 'Bewegung', min: 0, max: 2, step: 0.05, def: 0.4 },
+    bgLayers: { label: 'Ebenen', min: 1, max: 3, step: 1, def: 3 },
+    bgDepth:  { label: 'Ebenen-Abstand (m)', min: 0, max: 3, step: 0.1, def: 1 },
   }},
   { title: 'Sonne & Corona', items: {
     coronaCount: { label: 'Anzahl', min: 0, max: 18000, step: 300, def: 6000 },
@@ -223,7 +232,7 @@ function updateSource(dt) {
 // ---------- Sonne: wächst beim Summen, federnd nachgezogen ----------
 let sunScale = 1, sunVel = 0, sunWob = 0;
 let flow = 0, turb = 0, clock = 0, flyFlow = 0;
-let morph = 0, hue = 0;
+let morph = 0, hue = 0, grainT = 0;
 
 function updateSun(dt, level) {
   const goal = 1 + 0.12 * level;
@@ -250,6 +259,7 @@ function drawFractal() {
   gl.uniform1f(u.uExtent, SCENE.partExtent);
   gl.uniform1f(u.uR, SCENE.sunR * S.fracZoom * sunScale);
   gl.uniform1f(u.uHue, hue);
+  gl.uniform1f(u.uInner, S.fracInner);
   gl.bindVertexArray(fullscreen);
   for (let i = 0; i < 3; i++) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fracLayers[i].fb);
@@ -345,6 +355,7 @@ function update(t) {
   flyFlow += dt * (0.06 + amp * 0.35);
   clock += dt;
   morph += dt * S.fracSpeed * (0.25 + amp * 1.5);
+  grainT += dt * S.bgSpeed;
   updateSun(dt, amp);
   updateHue(dt, manualHum && !hum.level ? 150 : hum.pitch, amp > 0.15);
   if (fractalOn()) drawFractal();
@@ -398,6 +409,11 @@ function drawScene(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uMode, fractalOn() ? 1 : 0);
   gl.uniform1f(u.uFracOff, S.fracDepth);
   gl.uniform1f(u.uHue, hue);
+  gl.uniform1f(u.uGrain, S.bgGrain ? S.bgStrength : 0);
+  gl.uniform1f(u.uGrainSize, S.bgSize);
+  gl.uniform1f(u.uGrainT, grainT);
+  gl.uniform1f(u.uGrainLayers, S.bgLayers);
+  gl.uniform1f(u.uGrainDepth, S.bgDepth);
   ['uFrac0', 'uFrac1', 'uFrac2'].forEach((name, i) => {
     gl.activeTexture(gl.TEXTURE4 + i);
     gl.bindTexture(gl.TEXTURE_2D, fracLayers[i].tex);

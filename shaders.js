@@ -121,6 +121,7 @@ uniform float uR;        // ungefährer Radius des Objekts (m) für die Randblen
 uniform int   uIter;
 uniform float uHue;
 uniform float uFade;     // Deckkraft dieser Ebene
+uniform float uInner;    // Innenflächen: 0 = hell, 1 = hohl (dunkel), 2 = Struktur (Orbit-Trap)
 in vec2 vUv;
 out vec4 o;
 ${COLOR_GLSL}
@@ -135,13 +136,22 @@ vec3 palette(float t) {
 
 vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 
-// Escape-Time mit weicher Iterationszahl; Inneres = 1 (hell wie die Sonnenscheibe)
+vec2 phoenixP = vec2(0.0);   // Phoenix: Anteil des vorletzten Werts
+
+// Escape-Time mit weicher Iterationszahl.
+// Punkte, die nie entkommen (Innenflächen), würden sonst als große helle Flächen erscheinen:
+// je nach uInner hell, dunkel oder mit Orbit-Trap-Strukturen gefüllt.
 float escape(vec2 z, vec2 c, int mode, float norm) {
+  float trap = 1e9;
+  vec2 zp = vec2(0.0);
   for (int i = 0; i < 256; i++) {
     if (i >= uIter) break;
-    if (mode == 1) z = vec2(abs(z.x), abs(z.y));
     if (mode == 2) z.y = -z.y;
-    z = cmul(z, z) + c;
+    vec2 zn = cmul(z, z) + c;
+    if (mode == 1) zn += cmul(phoenixP, zp);
+    zp = z;
+    z = zn;
+    trap = min(trap, abs(length(z) - 0.6));
     float m = dot(z, z);
     if (m > 256.0) {
       float nu = float(i) + 1.0 - log2(log2(m) * 0.5);
@@ -149,7 +159,9 @@ float escape(vec2 z, vec2 c, int mode, float norm) {
       return clamp(nu / min(float(uIter), norm), 0.0, 1.0);
     }
   }
-  return 1.0;
+  if (uInner < 0.5) return 1.0;
+  if (uInner < 1.5) return 0.1;
+  return 0.06 + 0.8 * exp(-trap * 16.0);    // dunkle Fläche mit leuchtenden Bahnen
 }
 
 void main() {
@@ -159,11 +171,14 @@ void main() {
   float t;
 
   if (uType < 0.5) {                          // Julia: c wandert auf dem klassischen Kreis
-    float a = 2.4 + m * 0.23 + 0.4 * sin(m * 0.11);
+    // Winkel pendelt im Bereich mit sichtbaren Strukturen (vermeidet fast leere Phasen)
+    float a = 3.1 + 1.45 * sin(m * 0.12) + 0.15 * sin(m * 0.31);
     t = escape(z, 0.7885 * vec2(cos(a), sin(a)), 0, 48.0);
-  } else if (uType < 1.5) {                   // Burning Ship (Julia-Variante)
-    vec2 c = vec2(-0.62 + 0.2 * sin(m * 0.21), -0.95 + 0.07 * cos(m * 0.17));   // spitzenartige Sets
-    t = escape(z * vec2(1.0, -1.0) * 1.45, c, 1, 160.0);
+  } else if (uType < 1.5) {                   // Phoenix: z = z² + c + p·z(n-1) -> klare, federartige Formen
+    float a = 1.85 + 0.3 * sin(m * 0.2) + 0.08 * sin(m * 0.53);
+    vec2 c = vec2(0.5667 + 0.1 * cos(a), 0.0);
+    phoenixP = vec2(-0.5 + 0.1 * sin(a), 0.0);
+    t = escape(vec2(-z.y, z.x) * 0.9, c, 1, 48.0);
   } else if (uType < 2.5) {                   // Tricorn (Mandelbar-Julia)
     float a = 1.25 + 0.55 * sin(m * 0.19) + 0.2 * sin(m * 0.07);
     vec2 c = 0.63 * vec2(cos(a), sin(a));
@@ -187,8 +202,8 @@ void main() {
     float ang = atan(z.y, z.x);
     ang = abs(mod(ang, seg) - seg * 0.5);
     vec2 zf = length(z) * vec2(cos(ang), sin(ang));
-    float a = 1.9 + m * 0.17;
-    t = escape(zf * 0.62, 0.7885 * vec2(cos(a), sin(a)), 0, 48.0);
+    float a = 3.3 + 0.8 * sin(m * 0.15) + 0.1 * sin(m * 0.41);
+    t = escape(zf * 1.2, 0.7885 * vec2(cos(a), sin(a)), 0, 48.0);
   }
 
   // Helligkeit -> Farbe und Deckkraft
@@ -239,6 +254,11 @@ uniform sampler2D uFrac1; // Fraktal: Echo dahinter
 uniform sampler2D uFrac2; // Fraktal: Echo noch weiter dahinter
 uniform float uFracOff;   // Abstand der Fraktal-Ebenen (m)
 uniform float uHue;       // Farbton-Verschiebung des Fraktals
+uniform float uGrain;     // Stärke des Hintergrund-Korns (0 = aus)
+uniform float uGrainSize; // Korngröße
+uniform float uGrainT;    // integrierte Animationszeit
+uniform float uGrainLayers; // Anzahl Tiefenebenen 1..3
+uniform float uGrainDepth;  // Abstand der Ebenen (m)
 in vec3 vWorld;
 in vec2 vLocal;
 out vec4 o;
@@ -253,7 +273,18 @@ ${SUN_GLSL}
 ${COLOR_GLSL}
 
 vec3 ground(vec2 p) {
-  return vec3(0.07, 0.012, 0.006) + (hash(floor(p / uSunR * 245.0)) - 0.5) * 0.03;  // dunkelrot + Korn
+  return vec3(0.07, 0.012, 0.006);   // dunkelroter Grund (Korn kommt separat in Ebenen dazu)
+}
+
+// Animiertes Korn: Zellen driften langsam und funkeln weich (kein hartes Flackern)
+float grainLayer(vec2 p, float k) {
+  vec2 q = p / uSunR * 245.0 / uGrainSize * (1.0 + 0.15 * k);
+  q += uGrainT * vec2(2.0 + 1.5 * k, 1.2 - 2.0 * k);
+  vec2 cell = floor(q);
+  float h  = hash(cell + k * 37.0);
+  float h2 = hash(cell + 91.7 + k * 13.0);
+  float tw = 0.5 + 0.5 * sin(uGrainT * 5.0 + h2 * 6.2831853);
+  return (h - 0.5) * (0.4 + 1.2 * tw);
 }
 
 vec3 sun(vec2 p) {
@@ -298,6 +329,20 @@ void main() {
     vec4 f0 = texture(uFrac0, ps / (2.0 * uExtent) + 0.5);
     col = col * (1.0 - f0.a) + f0.rgb;
     cover = f0.a;
+  }
+
+  // Hintergrund-Korn in bis zu drei Tiefenebenen (hintere Ebenen werden vom Objekt verdeckt)
+  if (uGrain > 0.0) {
+    float g = 0.0;
+    for (int k = 0; k < 3; k++) {
+      if (float(k) >= uGrainLayers) break;
+      float fk = float(k);
+      float d = uDepth + fk * uGrainDepth;
+      vec2 pk = vLocal + rr.xy * (d / max(-rr.z, 0.05));
+      float w = (k == 0 ? 1.0 : 1.0 - cover) * (1.0 - 0.25 * fk);
+      g += grainLayer(pk, fk) * w;
+    }
+    col += g * uGrain;
   }
 
   // Corona-Ebenen, von hinten nach vorne "über" die Szene komponiert (vormultipliziert).

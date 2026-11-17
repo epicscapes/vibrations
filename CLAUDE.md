@@ -22,15 +22,18 @@ Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Qu
 - Nutzer steht/sitzt still; keine künstliche Fortbewegung.
 - Performance: Quest 3 soll stabil 72–90 fps halten. Wenige Lichter, sparsame Partikel, keine Post-Processing-Ketten.
 
-## Aktueller Stand (v0.7.0) – Szene „Sonne & Wasser“
+## Aktueller Stand (v0.8.0) – Szene „Sonne & Wasser“
 - Look nach Referenz: orange Sonnenscheibe wie eine Projektion, schmaler chromatischer Rand (gelb → orange → rot), gesättigter roter Glow, dunkelroter Grund mit feinem Korn.
 - Davor eine transparente, brechende Wasserebene (Quad 16 × 16 m, 5 m vor dem Nutzer, Behälter-Umkreisradius 3 m, Sonnenradius 1,4 m). Die Sonne liegt 1 m dahinter und wird per Brechung im Shader verzerrt (inkl. Parallaxe).
 - Shapes (Untermenü): Objekt im Zentrum = Sonne oder Fraktal.
-  Fraktal-Algorithmen: Julia, Burning Ship, Tricorn, Kaliset, Mandala (8-fach gefaltete Julia). Entwickeln sich über `morph` (Tempo × (0,25 + Lautstärke × 1,5)).
+  Fraktal-Algorithmen: Julia, Phoenix (ersetzt Burning Ship – war zu verrauscht), Tricorn, Kaliset, Mandala (8-fach gefaltete Julia). Entwickeln sich über `morph` (Tempo × (0,25 + Lautstärke × 1,5)).
+  Parameter pendeln nur in Bereichen mit sichtbarer Struktur (per Offline-Scan ermittelt; volle Drehung erzeugte lange leere Phasen).
+  Innenflächen (Punkte, die nie entkommen) wahlweise „Struktur“ (Orbit-Trap, Standard), „Hohl“ (dunkel) oder „Hell“ – verhindert große helle Flächen.
   Pro Frame in drei RGBA16F-Texturen gerendert (`fracFS`): aktuelle Form + zwei zeitversetzte, größere, blassere Echos in der Tiefe (`fracDepth`).
   Farbe = Sonnenpalette, dann Hue-Shift (YIQ-Rotation, `hueShift()` in `COLOR_GLSL`) nach Tonhöhe; ohne Summen langsam zurück zur Sonnenfarbe.
   Corona-Partikel entstehen im Fraktal-Modus an zufälligen Orten, sichtbar nur, wo das Fraktal hell ist, in dessen Farbe (Vertex-Shader liest die Fraktal-Textur).
   Auch die Partikel zu mir übernehmen den Farbton.
+- Hintergrund (Untermenü): animiertes Korn (Zellen driften und funkeln weich), bis zu 3 Tiefenebenen hinter dem Objekt (verdeckt), Stärke/Größe/Bewegung/Ebenen/Abstand, abschaltbar.
 - Sonne wächst beim Summen um bis zu 12 % (gedämpfte Feder); Rand wabert organisch (`sunRadius()` in `SUN_GLSL`).
 - Wellen: 2D-Wellengleichung auf der GPU (RG16F Ping-Pong), Auflösung 512–1536, Schritte/s = 480 × Auflösung/512.
   Anregung: `waveGain * amp^waveDyn` (Dynamik-Kurve: leises Summen = schwache Wellen). Tonhöhe → Wellenlänge, „Wellen-Frequenz“ verkürzt sie.
