@@ -1,12 +1,12 @@
 // Vibrations – Vanilla WebGL2 + WebXR (kein Framework)
 import {
   simVS, simFS, sceneVS, sceneFS, partVS, partFS, fadeFS,
-  flyVS, flyFS, tailVS, tailFS, TAIL_SEGMENTS,
+  flyVS, flyFS, tailVS, tailFS, TAIL_SEGMENTS, fracFS,
 } from './shaders.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.6.0';
+const VERSION = 'v0.7.0';
 
 // ---------- Feste Szenenwerte ----------
 const params = new URLSearchParams(location.search);
@@ -39,6 +39,16 @@ const SECTIONS = [
     dry:     { label: 'Eigene Stimme', min: 0, max: 1.5, step: 0.05, def: 0 },
     gateThr: { label: 'Gate-Schwelle', min: 0.0005, max: 0.02, step: 0.0005, def: 0.002 },
   }, effects: true },
+  { title: 'Shapes', items: {
+    centerObj: { label: 'Objekt', options: [[0, 'Sonne'], [1, 'Fraktal']], def: 0 },
+    fracType:  { label: 'Fraktal-Algorithmus', options: [[0, 'Julia'], [1, 'Burning Ship'], [2, 'Tricorn'], [3, 'Kaliset'], [4, 'Mandala']], def: 0 },
+    fracZoom:  { label: 'Fraktal-Größe', min: 0.5, max: 2, step: 0.05, def: 1 },
+    fracDepth: { label: 'Fraktal-Tiefe (m)', min: 0, max: 1.5, step: 0.05, def: 0.45 },
+    fracSpeed: { label: 'Entwicklungs-Tempo', min: 0, max: 3, step: 0.1, def: 1 },
+    fracIter:  { label: 'Detail (Iterationen)', min: 24, max: 192, step: 8, def: 80 },
+    fracRes:   { label: 'Fraktal-Auflösung', options: [[512, '512'], [768, '768'], [1024, '1024']], def: 768 },
+    hueShift:  { label: 'Hue-Shift nach Tonhöhe', min: 0, max: 1, step: 0.05, def: 1 },
+  }},
   { title: 'Sonne & Corona', items: {
     coronaCount: { label: 'Anzahl', min: 0, max: 18000, step: 300, def: 6000 },
     coronaSize:  { label: 'Größe', min: 0.3, max: 3, step: 0.1, def: 1 },
@@ -120,6 +130,7 @@ const partProg = program(partVS, partFS);
 const fadeProg = program(simVS, fadeFS);
 const flyProg = program(flyVS, flyFS);
 const tailProg = program(tailVS, tailFS);
+const fracProg = program(simVS, fracFS);
 const emptyVao = gl.createVertexArray();
 const fullscreen = vao([-1, -1, 3, -1, -1, 3]);
 const h = SCENE.half;
@@ -157,6 +168,15 @@ setSimRes(S.simRes);
 // Corona: drei Tiefenebenen (vor / auf / hinter der Sonnenebene)
 const PART_SIZE = 1024;
 const coronaLayers = [0, 1, 2].map(() => target(PART_SIZE, gl.RGBA16F, gl.RGBA));
+
+// Fraktal: drei Ebenen (aktuell + zwei zeitversetzte Echos in der Tiefe), Auflösung umschaltbar
+let FRAC_SIZE = 768, fracLayers = [];
+function setFracRes(size) {
+  for (const t of fracLayers) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
+  FRAC_SIZE = size;
+  fracLayers = [0, 1, 2].map(() => target(size, gl.RGBA16F, gl.RGBA));
+}
+setFracRes(S.fracRes);
 
 // ---------- Wellen-Simulation ----------
 let srcPos = [0.5, 0.5];       // Anregungsort (UV), folgt optional dem Blick
@@ -203,6 +223,7 @@ function updateSource(dt) {
 // ---------- Sonne: wächst beim Summen, federnd nachgezogen ----------
 let sunScale = 1, sunVel = 0, sunWob = 0;
 let flow = 0, turb = 0, clock = 0, flyFlow = 0;
+let morph = 0, hue = 0;
 
 function updateSun(dt, level) {
   const goal = 1 + 0.12 * level;
@@ -216,6 +237,39 @@ function sunUniforms(u) {
   gl.uniform1f(u.uSunScale, sunScale);
   gl.uniform1f(u.uSunWob, sunWob);
   gl.uniform1f(u.uClock, clock);
+}
+
+// ---------- Fraktal ----------
+const fractalOn = () => S.centerObj === 1;
+
+function drawFractal() {
+  gl.useProgram(fracProg.p);
+  const u = fracProg.u;
+  gl.uniform1f(u.uType, S.fracType);
+  gl.uniform1i(u.uIter, S.fracIter);
+  gl.uniform1f(u.uExtent, SCENE.partExtent);
+  gl.uniform1f(u.uR, SCENE.sunR * S.fracZoom * sunScale);
+  gl.uniform1f(u.uHue, hue);
+  gl.bindVertexArray(fullscreen);
+  for (let i = 0; i < 3; i++) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fracLayers[i].fb);
+    gl.viewport(0, 0, FRAC_SIZE, FRAC_SIZE);
+    // Echos: etwas früherer Zustand, etwas größer, blasser
+    gl.uniform1f(u.uMorph, morph - i * 0.9);
+    gl.uniform1f(u.uScale, SCENE.sunR * 0.75 * S.fracZoom * sunScale * (1 + i * 0.07));
+    gl.uniform1f(u.uFade, [1, 0.55, 0.3][i]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+}
+
+// Farbton: Tonhöhe -> Position im Spektrum; ohne Summen langsam zurück zur Sonnenfarbe
+function updateHue(dt, pitch, humming) {
+  let goal = 0;
+  if (humming) {
+    const u = Math.min(Math.max(Math.log(pitch / 80) / Math.log(400 / 80), 0), 1);
+    goal = u * 2 * Math.PI * S.hueShift;
+  }
+  hue += (goal - hue) * Math.min(dt * (humming ? 1.5 : 0.15), 1);
 }
 
 // ---------- Corona ----------
@@ -245,6 +299,11 @@ function drawCorona(dt, level) {
       gl.uniform1f(u.uIdOffset, i * 100000);
       gl.uniform1f(u.uSizeMul, S.coronaSize);
       gl.uniform1f(u.uNoise, 1 / S.coronaNoise);
+      gl.uniform1f(u.uMode, fractalOn() ? 1 : 0);
+      gl.uniform1f(u.uFracR, SCENE.sunR * S.fracZoom * sunScale * 1.3);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, fracLayers[0].tex);
+      gl.uniform1i(u.uFrac, 0);
       gl.bindVertexArray(emptyVao);
       gl.drawArrays(gl.POINTS, 0, perLayer);
     }
@@ -285,7 +344,10 @@ function update(t) {
   turb += dt * (0.4 + amp * 1.5);
   flyFlow += dt * (0.06 + amp * 0.35);
   clock += dt;
+  morph += dt * S.fracSpeed * (0.25 + amp * 1.5);
   updateSun(dt, amp);
+  updateHue(dt, manualHum && !hum.level ? 150 : hum.pitch, amp > 0.15);
+  if (fractalOn()) drawFractal();
   drawCorona(dt, amp);
 
   if (hum.active) ui.status.textContent =
@@ -305,6 +367,7 @@ function flyUniforms(u, proj, view, cam, vpH) {
   gl.uniform1f(u.uSize, S.flySize);
   gl.uniform1f(u.uPxScale, proj[5] * vpH * 0.5);
   gl.uniform1f(u.uLevel, amp);
+  gl.uniform1f(u.uHue, fractalOn() ? hue : 0);
 }
 
 function drawScene(proj, view, cam, vpW, vpH) {
@@ -331,6 +394,14 @@ function drawScene(proj, view, cam, vpW, vpH) {
     gl.activeTexture(gl.TEXTURE1 + i);
     gl.bindTexture(gl.TEXTURE_2D, coronaLayers[i].tex);
     gl.uniform1i(u[name], 1 + i);
+  });
+  gl.uniform1f(u.uMode, fractalOn() ? 1 : 0);
+  gl.uniform1f(u.uFracOff, S.fracDepth);
+  gl.uniform1f(u.uHue, hue);
+  ['uFrac0', 'uFrac1', 'uFrac2'].forEach((name, i) => {
+    gl.activeTexture(gl.TEXTURE4 + i);
+    gl.bindTexture(gl.TEXTURE_2D, fracLayers[i].tex);
+    gl.uniform1i(u[name], 4 + i);
   });
   gl.bindVertexArray(quad);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -404,6 +475,7 @@ function decimals(step) { return step >= 1 ? 0 : Math.min(Math.ceil(-Math.log10(
 
 function applySetting(key) {
   if (key === 'simRes') setSimRes(S.simRes);
+  if (key === 'fracRes') setFracRes(S.fracRes);
   if (!fx) return;
   if (key === 'volume') fx.setVolume(S.volume);
   if (key === 'dry') fx.setDry(S.dry);

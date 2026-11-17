@@ -61,6 +61,17 @@ void main() {
   o = vec4(clamp(n, -4.0, 4.0), h, 0.0, 1.0);
 }`;
 
+// ---------- Farbe: Hue-Shift (Rotation im YIQ-Farbraum, Helligkeit bleibt) ----------
+const COLOR_GLSL = `
+vec3 hueShift(vec3 c, float a) {
+  const mat3 toYIQ = mat3(0.299, 0.596, 0.211, 0.587, -0.274, -0.523, 0.114, -0.322, 0.312);
+  const mat3 toRGB = mat3(1.0, 1.0, 1.0, 0.956, -0.272, -1.106, 0.621, -0.647, 1.703);
+  vec3 yiq = toYIQ * c;
+  float ca = cos(a), sa = sin(a);
+  yiq.yz = mat2(ca, sa, -sa, ca) * yiq.yz;
+  return max(toRGB * yiq, 0.0);
+}`;
+
 // ---------- Sonne (gemeinsam für Szene und Corona) ----------
 const SUN_GLSL = `
 uniform float uSunR;
@@ -93,6 +104,99 @@ vec3 sunDisc(vec2 p, float R) {
   col += vec3(0.55, 0.09, 0.02) * exp(-e / (R * 0.08)) * 0.3;   // schmaler, gesättigter Saum
   col += vec3(0.22, 0.03, 0.01) * exp(-e / (R * 1.2));          // weiter Halo
   return col;
+}`;
+
+
+// ---------- Fraktal (Alternative zur Sonne) ----------
+// Wird pro Frame in drei Texturen gerendert (Tiefenebenen: aktuelle Form + zwei
+// zeitlich verzögerte "Echos" dahinter). Gespeichert vormultipliziert: rgb*a, a = Helligkeit.
+// Farbe = Sonnenpalette, danach Hue-Shift nach Tonhöhe.
+export const fracFS = `#version 300 es
+precision highp float;
+uniform float uType;     // 0 Julia, 1 Burning Ship, 2 Tricorn, 3 Kaliset, 4 Mandala
+uniform float uMorph;    // integrierte Entwicklungszeit (schneller beim Summen)
+uniform float uScale;    // Meter pro Fraktal-Einheit
+uniform float uExtent;   // halbe Kantenlänge der Textur (m)
+uniform float uR;        // ungefährer Radius des Objekts (m) für die Randblende
+uniform int   uIter;
+uniform float uHue;
+uniform float uFade;     // Deckkraft dieser Ebene
+in vec2 vUv;
+out vec4 o;
+${COLOR_GLSL}
+
+// Sonnenpalette: dunkelrot -> rot -> orange -> hellgelb
+vec3 palette(float t) {
+  vec3 c = mix(vec3(0.07, 0.012, 0.006), vec3(0.55, 0.09, 0.02), smoothstep(0.0, 0.3, t));
+  c = mix(c, vec3(0.97, 0.46, 0.13), smoothstep(0.25, 0.65, t));
+  c = mix(c, vec3(1.0, 0.72, 0.36), smoothstep(0.6, 1.0, t));
+  return c;
+}
+
+vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+
+// Escape-Time mit weicher Iterationszahl; Inneres = 1 (hell wie die Sonnenscheibe)
+float escape(vec2 z, vec2 c, int mode, float norm) {
+  for (int i = 0; i < 256; i++) {
+    if (i >= uIter) break;
+    if (mode == 1) z = vec2(abs(z.x), abs(z.y));
+    if (mode == 2) z.y = -z.y;
+    z = cmul(z, z) + c;
+    float m = dot(z, z);
+    if (m > 256.0) {
+      float nu = float(i) + 1.0 - log2(log2(m) * 0.5);
+      // auf max. "norm" normiert: feine Außenstrukturen leuchten sichtbar, auch bei vielen Iterationen
+      return clamp(nu / min(float(uIter), norm), 0.0, 1.0);
+    }
+  }
+  return 1.0;
+}
+
+void main() {
+  vec2 p = (vUv * 2.0 - 1.0) * uExtent;      // Meter auf der Ebene
+  vec2 z = p / uScale;
+  float m = uMorph;
+  float t;
+
+  if (uType < 0.5) {                          // Julia: c wandert auf dem klassischen Kreis
+    float a = 2.4 + m * 0.23 + 0.4 * sin(m * 0.11);
+    t = escape(z, 0.7885 * vec2(cos(a), sin(a)), 0, 48.0);
+  } else if (uType < 1.5) {                   // Burning Ship (Julia-Variante)
+    vec2 c = vec2(-0.62 + 0.2 * sin(m * 0.21), -0.95 + 0.07 * cos(m * 0.17));   // spitzenartige Sets
+    t = escape(z * vec2(1.0, -1.0) * 1.45, c, 1, 160.0);
+  } else if (uType < 2.5) {                   // Tricorn (Mandelbar-Julia)
+    float a = 1.25 + 0.55 * sin(m * 0.19) + 0.2 * sin(m * 0.07);
+    vec2 c = 0.63 * vec2(cos(a), sin(a));
+    t = escape(z, c, 2, 48.0);
+  } else if (uType < 3.5) {                   // Kaliset: z = |z|/|z|² - c, Orbit-Akkumulation
+    vec2 c = vec2(0.56, 0.47) + 0.06 * vec2(sin(m * 0.13), cos(m * 0.1));
+    vec2 q = z * 0.75;
+    float acc = 0.0, prev = 0.0;
+    int n = max(uIter / 4, 8);
+    for (int i = 0; i < 64; i++) {
+      if (i >= n) break;
+      q = abs(q) / dot(q, q) - c;
+      float d = dot(q, q);
+      acc += exp(-4.0 * abs(d - prev));
+      prev = d;
+    }
+    t = clamp(acc / float(n) * 2.6, 0.0, 1.0);
+    t *= 1.0 - smoothstep(0.9, 1.6, length(z));   // unendliches Muster -> zur Mitte bündeln
+  } else {                                    // Mandala: 8-fach gefaltete Julia-Menge
+    float seg = 6.2831853 / 8.0;
+    float ang = atan(z.y, z.x);
+    ang = abs(mod(ang, seg) - seg * 0.5);
+    vec2 zf = length(z) * vec2(cos(ang), sin(ang));
+    float a = 1.9 + m * 0.17;
+    t = escape(zf * 0.62, 0.7885 * vec2(cos(a), sin(a)), 0, 48.0);
+  }
+
+  // Helligkeit -> Farbe und Deckkraft
+  float b = pow(t, 0.75);
+  vec3 col = hueShift(palette(b), uHue);
+  float a = smoothstep(0.12, 0.7, b) * uFade;
+  a *= 1.0 - smoothstep(uR * 1.5, uR * 2.4, length(p));  // weich ausblenden
+  o = vec4(col * a, a);
 }`;
 
 // ---------- Szene ----------
@@ -129,6 +233,12 @@ uniform sampler2D uPart1; // Corona auf der Sonnenebene
 uniform sampler2D uPart2; // Corona hinter der Sonne
 uniform vec3  uLayerOff;  // Tiefenversatz der drei Ebenen relativ zur Sonnenebene (m)
 uniform float uExtent;    // halbe Kantenlänge der Partikeltexturen (m)
+uniform float uMode;      // 0 = Sonne, 1 = Fraktal
+uniform sampler2D uFrac0; // Fraktal: aktuelle Form
+uniform sampler2D uFrac1; // Fraktal: Echo dahinter
+uniform sampler2D uFrac2; // Fraktal: Echo noch weiter dahinter
+uniform float uFracOff;   // Abstand der Fraktal-Ebenen (m)
+uniform float uHue;       // Farbton-Verschiebung des Fraktals
 in vec3 vWorld;
 in vec2 vLocal;
 out vec4 o;
@@ -140,12 +250,14 @@ float hash(vec2 p) {
 }
 
 ${SUN_GLSL}
+${COLOR_GLSL}
+
+vec3 ground(vec2 p) {
+  return vec3(0.07, 0.012, 0.006) + (hash(floor(p / uSunR * 245.0)) - 0.5) * 0.03;  // dunkelrot + Korn
+}
 
 vec3 sun(vec2 p) {
-  vec3 col = sunDisc(p, sunRadius(p));
-  col += vec3(0.07, 0.012, 0.006);
-  col += (hash(floor(p / uSunR * 245.0)) - 0.5) * 0.03;   // Korn relativ zur Sonnengröße
-  return col;
+  return sunDisc(p, sunRadius(p)) + ground(p);
 }
 
 vec4 layer(sampler2D tex, vec3 rr, float depth) {
@@ -170,12 +282,28 @@ void main() {
   float t  = uDepth / max(-rr.z, 0.05);
   vec2 ps  = vLocal + rr.xy * t;
 
-  vec3 col = sun(ps);
+  vec3 col;
+  float cover;                                   // was die hintere Corona-Ebene verdeckt
+  if (uMode < 0.5) {
+    col = sun(ps);
+    cover = sunCover(ps);
+  } else {
+    // Fraktal: drei Ebenen, von hinten nach vorne (vormultipliziert)
+    // weiter Glow wie bei der Sonne, im aktuellen Farbton
+    col = ground(ps) + hueShift(vec3(0.22, 0.03, 0.01), uHue) * exp(-length(ps) / (uSunR * 1.2));
+    vec4 f2 = layer(uFrac2, rr, uDepth + uFracOff * 2.0);
+    col = col * (1.0 - f2.a) + f2.rgb;
+    vec4 f1 = layer(uFrac1, rr, uDepth + uFracOff);
+    col = col * (1.0 - f1.a) + f1.rgb;
+    vec4 f0 = texture(uFrac0, ps / (2.0 * uExtent) + 0.5);
+    col = col * (1.0 - f0.a) + f0.rgb;
+    cover = f0.a;
+  }
 
   // Corona-Ebenen, von hinten nach vorne "über" die Szene komponiert (vormultipliziert).
   // Die hintere Ebene wird von der Sonnenscheibe verdeckt.
   vec4 back = layer(uPart2, rr, uDepth + uLayerOff.z);
-  float vis = 1.0 - sunCover(ps);
+  float vis = 1.0 - cover;
   col = col * (1.0 - min(back.a, 1.0) * vis) + back.rgb * vis;
   vec4 mid = layer(uPart1, rr, uDepth + uLayerOff.y);
   col = col * (1.0 - min(mid.a, 1.0)) + mid.rgb;
@@ -208,6 +336,9 @@ uniform float uPx;       // Texel pro Meter
 uniform float uIdOffset; // trennt die Partikel der drei Ebenen
 uniform float uSizeMul;  // Größe aus dem UI
 uniform float uNoise;    // Frequenz-Faktor des Emissions-Noise (größer = feiner)
+uniform float uMode;     // 0 = Sonne, 1 = Fraktal
+uniform sampler2D uFrac; // Fraktal-Textur (vordere Ebene) -> Geburtsort und Farbe
+uniform float uFracR;    // Radius, in dem Fraktal-Partikel entstehen können
 out float vA;
 out vec3 vCol;
 
@@ -238,12 +369,23 @@ void main() {
   float s4 = h1(id * 2.11 + cycle * 3.17 + 5.0);
 
   float ang = s3 * 6.2831853;
-  float dens = smoothstep(0.4, 0.75, emission(ang, uClock));
-
   vec2 dir = vec2(cos(ang), sin(ang));
-  float Rb = sunRadius(dir);
-  float r0 = Rb * (0.86 + 0.13 * s4);              // Geburt knapp innerhalb des Randes
-  float dist = pow(prog, 1.2) * uSunR * 1.4 * (0.5 + 0.5 * s4);
+  float dens, r0;
+  vec3 birth;
+  if (uMode < 0.5) {
+    dens = smoothstep(0.4, 0.75, emission(ang, uClock));
+    float Rb = sunRadius(dir);
+    r0 = Rb * (0.86 + 0.13 * s4);                  // Geburt knapp innerhalb des Randes
+    birth = sunDisc(dir * r0, Rb);
+  } else {
+    // Fraktal: zufälliger Ort, sichtbar nur, wo das Fraktal hell ist; Farbe von dort
+    r0 = sqrt(h1(id * 4.13 + cycle * 1.9)) * uFracR;
+    vec4 f = textureLod(uFrac, dir * r0 / (2.0 * uExtent) + 0.5, 0.0);
+    float a = f.a;
+    birth = f.rgb / max(a, 1e-3);
+    dens = smoothstep(0.2, 0.6, a);
+  }
+  float dist = pow(prog, 1.2) * uSunR * (uMode < 0.5 ? 1.4 : 2.0) * (0.5 + 0.5 * s4);
   float r = r0 + dist;
 
   // Turbulenz: seitliches Verwirbeln, wächst mit Abstand und Lautstärke
@@ -257,11 +399,12 @@ void main() {
   gl_Position = vec4(p / uExtent, 0.0, 1.0);
   gl_PointSize = max(mix(0.02, 0.009, prog) * uSunR * uPx * uSizeMul, 1.0);
 
-  // Farbe = Farbe der Sonne am Geburtsort, glüht dann langsam ins Rot aus
-  vec3 birth = sunDisc(dir * r0, Rb);
-  vCol = mix(birth, birth * vec3(0.85, 0.3, 0.15), smoothstep(0.0, 0.9, prog));
+  // Farbe = Farbe am Geburtsort, glüht dann langsam dunkler aus (im Fraktal-Modus farbtreu)
+  vec3 fadeTo = uMode < 0.5 ? birth * vec3(0.85, 0.3, 0.15) : birth * 0.45;
+  vCol = mix(birth, fadeTo, smoothstep(0.0, 0.9, prog));
 
   vA = dens * smoothstep(0.0, 0.05, prog) * (1.0 - prog) * (0.3 + 0.7 * s4) * (0.7 + 0.6 * uLevel);
+  if (uMode > 0.5) { vA = min(vA * 1.8, 1.0); gl_PointSize *= 1.3; }
 }`;
 
 export const partFS = `#version 300 es
@@ -298,8 +441,10 @@ uniform float uClock;
 uniform float uSize;     // Größe in Metern
 uniform float uPxScale;  // Pixel pro (Meter / Abstand)
 uniform float uLevel;
+uniform float uHue;      // Farbton-Verschiebung (nur im Fraktal-Modus ≠ 0)
 
 float h1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+${COLOR_GLSL}
 
 struct Fly { float prog; float s1; float s2; float s5; float a; float rr; };
 
@@ -331,7 +476,7 @@ float flyAlpha(Fly f, vec3 p) {
        * (0.25 + 0.5 * f.s5) * (0.5 + 0.7 * uLevel);
 }
 
-vec3 flyColor(Fly f) { return mix(vec3(1.0, 0.62, 0.26), vec3(0.95, 0.3, 0.08), f.s5); }
+vec3 flyColor(Fly f) { return hueShift(mix(vec3(1.0, 0.62, 0.26), vec3(0.95, 0.3, 0.08), f.s5), uHue); }
 `;
 
 export const flyVS = `#version 300 es
