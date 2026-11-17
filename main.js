@@ -6,7 +6,7 @@ import {
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.8.0';
+const VERSION = 'v0.9.0';
 
 // ---------- Feste Szenenwerte ----------
 const params = new URLSearchParams(location.search);
@@ -45,8 +45,15 @@ const SECTIONS = [
     fracZoom:  { label: 'Fraktal-Größe', min: 0.5, max: 2, step: 0.05, def: 1 },
     fracDepth: { label: 'Fraktal-Tiefe (m)', min: 0, max: 1.5, step: 0.05, def: 0.45 },
     fracSpeed: { label: 'Entwicklungs-Tempo', min: 0, max: 3, step: 0.1, def: 1 },
-    fracIter:  { label: 'Detail (Iterationen)', min: 24, max: 192, step: 8, def: 80 },
-    fracRes:   { label: 'Fraktal-Auflösung', options: [[512, '512'], [768, '768'], [1024, '1024']], def: 768 },
+    fracIter:  { label: 'Detail (Iterationen)', min: 4, max: 96, step: 2, def: 48 },
+    fracRes:   { label: 'Fraktal-Auflösung', options: [[512, '512'], [768, '768'], [1024, '1024'], [1536, '1536'], [2048, '2048 (schwer)'], [3072, '3072 (sehr schwer)']], def: 768 },
+    fracCount: { label: 'Anzahl Ebenen', min: 1, max: 6, step: 1, def: 3 },
+    fracBlend: { label: 'Ebenen-Mischmodus', options: [[0, 'Normal'], [1, 'Additiv'], [2, 'Screen'], [3, 'Difference'], [4, 'Aufhellen']], def: 0 },
+    echoFade:  { label: 'Echo-Deckkraft', min: 0.1, max: 1, step: 0.05, def: 0.55 },
+    echoSat:   { label: 'Echo-Sättigung (+ pro Kopie)', min: 0, max: 1, step: 0.05, def: 0.35 },
+    echoHue:   { label: 'Echo-Farbversatz (pro Kopie)', min: -1, max: 1, step: 0.05, def: 0.2 },
+    relief:    { label: 'Relief-Tiefe (m, 0 = aus)', min: 0, max: 1.5, step: 0.05, def: 0 },
+    reliefSteps: { label: 'Relief-Qualität (Schritte)', min: 6, max: 48, step: 2, def: 16 },
     fracInner: { label: 'Helle Innenflächen', options: [[2, 'Struktur'], [1, 'Hohl'], [0, 'Hell']], def: 2 },
     hueShift:  { label: 'Hue-Shift nach Tonhöhe', min: 0, max: 1, step: 0.05, def: 1 },
   }},
@@ -179,13 +186,31 @@ const PART_SIZE = 1024;
 const coronaLayers = [0, 1, 2].map(() => target(PART_SIZE, gl.RGBA16F, gl.RGBA));
 
 // Fraktal: drei Ebenen (aktuell + zwei zeitversetzte Echos in der Tiefe), Auflösung umschaltbar
-let FRAC_SIZE = 768, fracLayers = [];
-function setFracRes(size) {
-  for (const t of fracLayers) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
+// Alle Ebenen liegen in einem Textur-Array; es wird nur so viel Speicher belegt, wie Ebenen eingestellt sind.
+let FRAC_SIZE = 768, fracTex = null, fracFbs = [], fracCount = 0;
+function setFracLayers(size, count) {
+  if (fracTex) gl.deleteTexture(fracTex);
+  for (const fb of fracFbs) gl.deleteFramebuffer(fb);
   FRAC_SIZE = size;
-  fracLayers = [0, 1, 2].map(() => target(size, gl.RGBA16F, gl.RGBA));
+  fracCount = count;
+  fracTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
+  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA16F, size, size, count);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  fracFbs = [];
+  for (let i = 0; i < count; i++) {
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, fracTex, 0, i);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    fracFbs.push(fb);
+  }
 }
-setFracRes(S.fracRes);
+setFracLayers(S.fracRes, S.fracCount);
 
 // ---------- Wellen-Simulation ----------
 let srcPos = [0.5, 0.5];       // Anregungsort (UV), folgt optional dem Blick
@@ -261,13 +286,15 @@ function drawFractal() {
   gl.uniform1f(u.uHue, hue);
   gl.uniform1f(u.uInner, S.fracInner);
   gl.bindVertexArray(fullscreen);
-  for (let i = 0; i < 3; i++) {
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fracLayers[i].fb);
+  for (let i = 0; i < fracCount; i++) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fracFbs[i]);
     gl.viewport(0, 0, FRAC_SIZE, FRAC_SIZE);
     // Echos: etwas früherer Zustand, etwas größer, blasser
     gl.uniform1f(u.uMorph, morph - i * 0.9);
     gl.uniform1f(u.uScale, SCENE.sunR * 0.75 * S.fracZoom * sunScale * (1 + i * 0.07));
-    gl.uniform1f(u.uFade, [1, 0.55, 0.3][i]);
+    gl.uniform1f(u.uFade, Math.pow(S.echoFade, i));
+    gl.uniform1f(u.uSat, 1 + S.echoSat * i);
+    gl.uniform1f(u.uHueOff, S.echoHue * i);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 }
@@ -312,7 +339,7 @@ function drawCorona(dt, level) {
       gl.uniform1f(u.uMode, fractalOn() ? 1 : 0);
       gl.uniform1f(u.uFracR, SCENE.sunR * S.fracZoom * sunScale * 1.3);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, fracLayers[0].tex);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
       gl.uniform1i(u.uFrac, 0);
       gl.bindVertexArray(emptyVao);
       gl.drawArrays(gl.POINTS, 0, perLayer);
@@ -409,16 +436,19 @@ function drawScene(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uMode, fractalOn() ? 1 : 0);
   gl.uniform1f(u.uFracOff, S.fracDepth);
   gl.uniform1f(u.uHue, hue);
+  gl.uniform1f(u.uBlend, S.fracBlend);
+  gl.uniform1f(u.uRelief, Math.min(S.relief, SCENE.depth - 0.05));   // nicht vor die Wasserebene
+  gl.uniform1f(u.uReliefSteps, S.reliefSteps);
+  gl.uniform1f(u.uFracRad, SCENE.sunR * S.fracZoom * sunScale * 2.4);
   gl.uniform1f(u.uGrain, S.bgGrain ? S.bgStrength : 0);
   gl.uniform1f(u.uGrainSize, S.bgSize);
   gl.uniform1f(u.uGrainT, grainT);
   gl.uniform1f(u.uGrainLayers, S.bgLayers);
   gl.uniform1f(u.uGrainDepth, S.bgDepth);
-  ['uFrac0', 'uFrac1', 'uFrac2'].forEach((name, i) => {
-    gl.activeTexture(gl.TEXTURE4 + i);
-    gl.bindTexture(gl.TEXTURE_2D, fracLayers[i].tex);
-    gl.uniform1i(u[name], 4 + i);
-  });
+  gl.uniform1f(u.uFracCount, fracCount);
+  gl.activeTexture(gl.TEXTURE4);
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
+  gl.uniform1i(u.uFracArr, 4);
   gl.bindVertexArray(quad);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
@@ -491,7 +521,7 @@ function decimals(step) { return step >= 1 ? 0 : Math.min(Math.ceil(-Math.log10(
 
 function applySetting(key) {
   if (key === 'simRes') setSimRes(S.simRes);
-  if (key === 'fracRes') setFracRes(S.fracRes);
+  if (key === 'fracRes' || key === 'fracCount') setFracLayers(S.fracRes, S.fracCount);
   if (!fx) return;
   if (key === 'volume') fx.setVolume(S.volume);
   if (key === 'dry') fx.setDry(S.dry);

@@ -22,14 +22,19 @@ Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Qu
 - Nutzer steht/sitzt still; keine künstliche Fortbewegung.
 - Performance: Quest 3 soll stabil 72–90 fps halten. Wenige Lichter, sparsame Partikel, keine Post-Processing-Ketten.
 
-## Aktueller Stand (v0.8.0) – Szene „Sonne & Wasser“
+## Aktueller Stand (v0.9.0) – Szene „Sonne & Wasser“
 - Look nach Referenz: orange Sonnenscheibe wie eine Projektion, schmaler chromatischer Rand (gelb → orange → rot), gesättigter roter Glow, dunkelroter Grund mit feinem Korn.
 - Davor eine transparente, brechende Wasserebene (Quad 16 × 16 m, 5 m vor dem Nutzer, Behälter-Umkreisradius 3 m, Sonnenradius 1,4 m). Die Sonne liegt 1 m dahinter und wird per Brechung im Shader verzerrt (inkl. Parallaxe).
 - Shapes (Untermenü): Objekt im Zentrum = Sonne oder Fraktal.
   Fraktal-Algorithmen: Julia, Phoenix (ersetzt Burning Ship – war zu verrauscht), Tricorn, Kaliset, Mandala (8-fach gefaltete Julia). Entwickeln sich über `morph` (Tempo × (0,25 + Lautstärke × 1,5)).
   Parameter pendeln nur in Bereichen mit sichtbarer Struktur (per Offline-Scan ermittelt; volle Drehung erzeugte lange leere Phasen).
   Innenflächen (Punkte, die nie entkommen) wahlweise „Struktur“ (Orbit-Trap, Standard), „Hohl“ (dunkel) oder „Hell“ – verhindert große helle Flächen.
-  Pro Frame in drei RGBA16F-Texturen gerendert (`fracFS`): aktuelle Form + zwei zeitversetzte, größere, blassere Echos in der Tiefe (`fracDepth`).
+  Pro Frame in ein RGBA16F-Textur-Array gerendert (`fracFS`, 1–6 Ebenen, Auflösung 512–3072): aktuelle Form + zeitversetzte, größere Echos in der Tiefe (`fracDepth`).
+  Echos: Deckkraft echoFade^i, Sättigung +echoSat pro Kopie, Farbversatz echoHue pro Kopie (gegen den Grauschleier).
+  Ebenen-Mischmodi: Normal, Additiv, Screen, Difference, Aufhellen (`blendLayer()` im Szene-Shader).
+  Iterationen 4–96 (Helligkeit auf max. 48 normiert; Kaliset nutzt Iterationen/3).
+  Relief (optional, Standard aus): Parallax-Occlusion-Mapping im Szene-Shader – Helligkeit der vorderen Ebene = Höhe, Strahl wird in N Schritten
+  durch die Höhenschicht verfolgt, plus Licht aus der Steigung. Nur aktiv, wenn Relief > 0 und Pixel im Fraktal-Radius; keine zusätzliche Geometrie.
   Farbe = Sonnenpalette, dann Hue-Shift (YIQ-Rotation, `hueShift()` in `COLOR_GLSL`) nach Tonhöhe; ohne Summen langsam zurück zur Sonnenfarbe.
   Corona-Partikel entstehen im Fraktal-Modus an zufälligen Orten, sichtbar nur, wo das Fraktal hell ist, in dessen Farbe (Vertex-Shader liest die Fraktal-Textur).
   Auch die Partikel zu mir übernehmen den Farbton.

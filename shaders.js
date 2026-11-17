@@ -121,6 +121,8 @@ uniform float uR;        // ungefährer Radius des Objekts (m) für die Randblen
 uniform int   uIter;
 uniform float uHue;
 uniform float uFade;     // Deckkraft dieser Ebene
+uniform float uSat;      // Sättigung dieser Ebene (Echos kräftiger -> kein Grauschleier)
+uniform float uHueOff;   // zusätzlicher Farbton-Versatz dieser Ebene
 uniform float uInner;    // Innenflächen: 0 = hell, 1 = hohl (dunkel), 2 = Struktur (Orbit-Trap)
 in vec2 vUv;
 out vec4 o;
@@ -187,7 +189,7 @@ void main() {
     vec2 c = vec2(0.56, 0.47) + 0.06 * vec2(sin(m * 0.13), cos(m * 0.1));
     vec2 q = z * 0.75;
     float acc = 0.0, prev = 0.0;
-    int n = max(uIter / 4, 8);
+    int n = max(uIter / 3, 2);
     for (int i = 0; i < 64; i++) {
       if (i >= n) break;
       q = abs(q) / dot(q, q) - c;
@@ -208,7 +210,9 @@ void main() {
 
   // Helligkeit -> Farbe und Deckkraft
   float b = pow(t, 0.75);
-  vec3 col = hueShift(palette(b), uHue);
+  vec3 col = hueShift(palette(b), uHue + uHueOff);
+  float luma = dot(col, vec3(0.299, 0.587, 0.114));
+  col = max(mix(vec3(luma), col, uSat), 0.0);
   float a = smoothstep(0.12, 0.7, b) * uFade;
   a *= 1.0 - smoothstep(uR * 1.5, uR * 2.4, length(p));  // weich ausblenden
   o = vec4(col * a, a);
@@ -249,11 +253,14 @@ uniform sampler2D uPart2; // Corona hinter der Sonne
 uniform vec3  uLayerOff;  // Tiefenversatz der drei Ebenen relativ zur Sonnenebene (m)
 uniform float uExtent;    // halbe Kantenlänge der Partikeltexturen (m)
 uniform float uMode;      // 0 = Sonne, 1 = Fraktal
-uniform sampler2D uFrac0; // Fraktal: aktuelle Form
-uniform sampler2D uFrac1; // Fraktal: Echo dahinter
-uniform sampler2D uFrac2; // Fraktal: Echo noch weiter dahinter
+uniform highp sampler2DArray uFracArr; // Fraktal-Ebenen: 0 = aktuelle Form, 1.. = Echos dahinter
+uniform float uFracCount; // Anzahl der Fraktal-Ebenen
 uniform float uFracOff;   // Abstand der Fraktal-Ebenen (m)
 uniform float uHue;       // Farbton-Verschiebung des Fraktals
+uniform float uBlend;     // Mischmodus der Fraktal-Ebenen: 0 Normal, 1 Additiv, 2 Screen, 3 Difference, 4 Aufhellen
+uniform float uRelief;    // Relief-Tiefe (m), 0 = aus
+uniform float uReliefSteps; // Abtastschritte des Reliefs
+uniform float uFracRad;   // Radius, außerhalb dessen kein Relief berechnet wird (m)
 uniform float uGrain;     // Stärke des Hintergrund-Korns (0 = aus)
 uniform float uGrainSize; // Korngröße
 uniform float uGrainT;    // integrierte Animationszeit
@@ -274,6 +281,50 @@ ${COLOR_GLSL}
 
 vec3 ground(vec2 p) {
   return vec3(0.07, 0.012, 0.006);   // dunkelroter Grund (Korn kommt separat in Ebenen dazu)
+}
+
+vec3 blendLayer(vec3 base, vec4 l) {
+  if (uBlend < 0.5) return base * (1.0 - l.a) + l.rgb;                 // Normal
+  if (uBlend < 1.5) return base + l.rgb;                               // Additiv
+  if (uBlend < 2.5) return 1.0 - (1.0 - clamp(base, 0.0, 1.0)) * (1.0 - l.rgb);  // Screen
+  if (uBlend < 3.5) return abs(base - l.rgb);                          // Difference
+  return max(base, l.rgb);                                             // Aufhellen
+}
+
+vec2 fracUV(vec2 p) { return p / (2.0 * uExtent) + 0.5; }
+
+// Relief per Parallax-Occlusion-Mapping: Helligkeit des Fraktals = Höhe (hell = näher).
+// Der gebrochene Strahl wird schrittweise durch die Höhenschicht verfolgt, bis er die Oberfläche trifft.
+// Läuft nur, wenn aktiviert und der Strahl in der Nähe des Fraktals ist.
+vec2 reliefHit(vec3 rr, vec2 ps, out float shade) {
+  shade = 1.0;
+  if (uRelief <= 0.0 || length(ps) > uFracRad) return ps;
+  float iz = 1.0 / max(-rr.z, 0.05);
+  float top = uDepth - uRelief;                 // vorderste mögliche Tiefe
+  float n = uReliefSteps;
+  float prevD = top, prevGap = -1.0;
+  vec2 hit = ps;
+  for (int i = 0; i <= 64; i++) {
+    if (float(i) > n) break;
+    float d = top + uRelief * float(i) / n;     // aktuelle Strahltiefe
+    vec2 p = vLocal + rr.xy * d * iz;
+    float h = texture(uFracArr, vec3(fracUV(p), 0.0)).a;
+    float gap = d - (uDepth - h * uRelief);     // >= 0: Strahl ist hinter der Oberfläche
+    if (gap >= 0.0) {
+      float k = prevGap < 0.0 ? clamp(-prevGap / (gap - prevGap), 0.0, 1.0) : 0.0;
+      d = mix(prevD, d, k);
+      hit = vLocal + rr.xy * d * iz;
+      break;
+    }
+    prevD = d; prevGap = gap;
+  }
+  // einfache Beleuchtung aus der Höhen-Steigung
+  float e = 2.0 * uExtent / float(textureSize(uFracArr, 0).x) * 2.0;
+  float hx = texture(uFracArr, vec3(fracUV(hit + vec2(e, 0.0)), 0.0)).a - texture(uFracArr, vec3(fracUV(hit - vec2(e, 0.0)), 0.0)).a;
+  float hy = texture(uFracArr, vec3(fracUV(hit + vec2(0.0, e)), 0.0)).a - texture(uFracArr, vec3(fracUV(hit - vec2(0.0, e)), 0.0)).a;
+  vec3 nrm = normalize(vec3(-hx, -hy, e * 4.0 / max(uRelief, 0.01)));
+  shade = 0.7 + 0.6 * max(dot(nrm, normalize(vec3(-0.5, 0.7, 0.6))), 0.0);
+  return hit;
 }
 
 // Animiertes Korn: Zellen driften langsam und funkeln weich (kein hartes Flackern)
@@ -322,12 +373,18 @@ void main() {
     // Fraktal: drei Ebenen, von hinten nach vorne (vormultipliziert)
     // weiter Glow wie bei der Sonne, im aktuellen Farbton
     col = ground(ps) + hueShift(vec3(0.22, 0.03, 0.01), uHue) * exp(-length(ps) / (uSunR * 1.2));
-    vec4 f2 = layer(uFrac2, rr, uDepth + uFracOff * 2.0);
-    col = col * (1.0 - f2.a) + f2.rgb;
-    vec4 f1 = layer(uFrac1, rr, uDepth + uFracOff);
-    col = col * (1.0 - f1.a) + f1.rgb;
-    vec4 f0 = texture(uFrac0, ps / (2.0 * uExtent) + 0.5);
-    col = col * (1.0 - f0.a) + f0.rgb;
+    // Echos von hinten nach vorne
+    for (int i = 5; i >= 1; i--) {
+      if (float(i) >= uFracCount) continue;
+      float d = uDepth + uFracOff * float(i);
+      vec2 pl = vLocal + rr.xy * (d / max(-rr.z, 0.05));
+      col = blendLayer(col, texture(uFracArr, vec3(fracUV(pl), float(i))));
+    }
+    float shade;
+    vec2 ph = reliefHit(rr, ps, shade);
+    vec4 f0 = texture(uFracArr, vec3(fracUV(ph), 0.0));
+    f0.rgb *= shade;
+    col = blendLayer(col, f0);
     cover = f0.a;
   }
 
@@ -382,7 +439,7 @@ uniform float uIdOffset; // trennt die Partikel der drei Ebenen
 uniform float uSizeMul;  // Größe aus dem UI
 uniform float uNoise;    // Frequenz-Faktor des Emissions-Noise (größer = feiner)
 uniform float uMode;     // 0 = Sonne, 1 = Fraktal
-uniform sampler2D uFrac; // Fraktal-Textur (vordere Ebene) -> Geburtsort und Farbe
+uniform highp sampler2DArray uFrac; // Fraktal-Ebenen (vordere = 0) -> Geburtsort und Farbe
 uniform float uFracR;    // Radius, in dem Fraktal-Partikel entstehen können
 out float vA;
 out vec3 vCol;
@@ -425,7 +482,7 @@ void main() {
   } else {
     // Fraktal: zufälliger Ort, sichtbar nur, wo das Fraktal hell ist; Farbe von dort
     r0 = sqrt(h1(id * 4.13 + cycle * 1.9)) * uFracR;
-    vec4 f = textureLod(uFrac, dir * r0 / (2.0 * uExtent) + 0.5, 0.0);
+    vec4 f = textureLod(uFrac, vec3(dir * r0 / (2.0 * uExtent) + 0.5, 0.0), 0.0);
     float a = f.a;
     birth = f.rgb / max(a, 1e-3);
     dens = smoothstep(0.2, 0.6, a);
