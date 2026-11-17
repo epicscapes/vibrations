@@ -1,141 +1,270 @@
-import * as THREE from 'three';
-import { VRButton } from 'three/addons/webxr/VRButton.js';
+// Vibrations – Vanilla WebGL2 + WebXR (kein Framework)
+import { simVS, simFS, sceneVS, sceneFS } from './shaders.js';
+import { HumDetector } from './audio.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.1.0';
-document.getElementById('version').textContent = `Vibrations ${VERSION}`;
+const VERSION = 'v0.2.0';
 
-// ---------- Grundgerüst ----------
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.xr.enabled = true;
-document.body.appendChild(renderer.domElement);
-document.body.appendChild(VRButton.createButton(renderer));
+// ---------- Einstellungen ----------
+const params = new URLSearchParams(location.search);
+const SUPERSAMPLE = parseFloat(params.get('scale') || '1.5'); // 150 % der nativen Display-Auflösung
+const SIM_SIZE = 512;          // Auflösung der Wellensimulation
+const SIM_RATE = 480;          // Simulationsschritte pro Sekunde
+const WAVE_K = 0.25;           // c² -> 0.5 Texel pro Schritt
+const DAMP = 0.9993;          // geringe Dämpfung -> Wellen erreichen den Rand und reflektieren
+const SCENE = {
+  center: [0, 0, -2.5],        // Wasserebene 2,5 m vor dem Startpunkt, auf Augenhöhe
+  half: 4.0,                   // Quad 8 × 8 m
+  waterR: 1.5,                 // Radius des Behälters (Reflexionsrand)
+  sunR: 0.7,                   // Radius der Sonnenscheibe
+  depth: 0.5,                  // Sonne liegt 50 cm hinter dem Wasser
+  bump: 3.0,
+  sym: 6,                      // Symmetrie der Interferenzmuster
+  lobe: 0.08,
+};
 
-const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x05060f, 0.045);
+const ui = {
+  version: document.getElementById('version'),
+  status: document.getElementById('status'),
+  mic: document.getElementById('mic'),
+  vr: document.getElementById('vr'),
+};
+ui.version.textContent = `Vibrations ${VERSION}`;
 
-const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 200);
-camera.position.set(0, 1.6, 0);
-
-// ---------- Himmel: weicher Verlauf ----------
-const sky = new THREE.Mesh(
-  new THREE.SphereGeometry(100, 32, 16),
-  new THREE.ShaderMaterial({
-    side: THREE.BackSide,
-    depthWrite: false,
-    uniforms: { top: { value: new THREE.Color(0x0a1030) }, bottom: { value: new THREE.Color(0x1a0f2a) } },
-    vertexShader: `varying vec3 vPos; void main(){ vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-    fragmentShader: `uniform vec3 top; uniform vec3 bottom; varying vec3 vPos;
-      void main(){ float h = normalize(vPos).y * 0.5 + 0.5; gl_FragColor = vec4(mix(bottom, top, smoothstep(0.0, 1.0, h)), 1.0); }`
-  })
-);
-scene.add(sky);
-
-// ---------- Boden: dunkle, ruhige Wasserfläche ----------
-const ground = new THREE.Mesh(
-  new THREE.CircleGeometry(60, 64),
-  new THREE.MeshStandardMaterial({ color: 0x0b0f22, roughness: 0.35, metalness: 0.6 })
-);
-ground.rotation.x = -Math.PI / 2;
-scene.add(ground);
-
-scene.add(new THREE.AmbientLight(0x404a80, 0.6));
-
-// ---------- Atem-Kugel: 4 s ein, 4 s aus ----------
-const BREATH = 8; // Sekunden pro Atemzug
-const orbLight = new THREE.PointLight(0x8fb8ff, 3, 12, 1.5);
-const orb = new THREE.Mesh(
-  new THREE.SphereGeometry(0.25, 48, 24),
-  new THREE.MeshStandardMaterial({ color: 0x9cc4ff, emissive: 0x4f7dff, emissiveIntensity: 1.2, transparent: true, opacity: 0.9 })
-);
-orb.position.set(0, 1.5, -2.2);
-orb.add(orbLight);
-scene.add(orb);
-
-// Halo um die Kugel
-const halo = new THREE.Mesh(
-  new THREE.SphereGeometry(0.45, 32, 16),
-  new THREE.MeshBasicMaterial({ color: 0x6f9bff, transparent: true, opacity: 0.12, depthWrite: false })
-);
-orb.add(halo);
-
-// ---------- Schwebende Lichtpartikel ----------
-const COUNT = 600;
-const positions = new Float32Array(COUNT * 3);
-const seeds = new Float32Array(COUNT);
-for (let i = 0; i < COUNT; i++) {
-  const r = 3 + Math.random() * 25;
-  const a = Math.random() * Math.PI * 2;
-  positions[i * 3] = Math.cos(a) * r;
-  positions[i * 3 + 1] = 0.2 + Math.random() * 8;
-  positions[i * 3 + 2] = Math.sin(a) * r;
-  seeds[i] = Math.random() * 100;
+// ---------- WebGL2 ----------
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, xrCompatible: true, alpha: false });
+if (!gl) throw fail('WebGL2 wird nicht unterstützt.');
+if (!gl.getExtension('EXT_color_buffer_float') && !gl.getExtension('EXT_color_buffer_half_float')) {
+  throw fail('Float-Rendertargets werden nicht unterstützt.');
 }
-const particleGeo = new THREE.BufferGeometry();
-particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-const particles = new THREE.Points(
-  particleGeo,
-  new THREE.PointsMaterial({ color: 0xc8d8ff, size: 0.06, transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending })
-);
-scene.add(particles);
 
-// ---------- Klang: sanfter Drone (startet mit der VR-Session) ----------
-let audio;
-function startAudio() {
-  if (audio) return;
-  const ctx = new AudioContext();
-  const master = ctx.createGain();
-  master.gain.value = 0;
-  master.connect(ctx.destination);
-  master.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 4);
-  // Grundton + Quinte + Oktave, leicht verstimmt für Schwebungen ("Vibrations")
-  [[110, 0], [110.6, 0], [165, 0.5], [220.4, 0.3]].forEach(([freq, pan]) => {
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.value = freq;
-    const g = ctx.createGain();
-    g.gain.value = 0.25;
-    const p = ctx.createStereoPanner();
-    p.pan.value = pan;
-    osc.connect(g).connect(p).connect(master);
-    osc.start();
-  });
-  audio = { ctx, master };
-}
-renderer.xr.addEventListener('sessionstart', startAudio);
-renderer.xr.addEventListener('sessionend', () => { audio?.ctx.close(); audio = null; });
+function fail(msg) { ui.status.textContent = msg; return new Error(msg); }
 
-// ---------- Animation ----------
-const clock = new THREE.Clock();
-renderer.setAnimationLoop(() => {
-  const t = clock.getElapsedTime();
-
-  // Atmen: 0 → 1 → 0 über BREATH Sekunden, weich (Sinus)
-  const breath = 0.5 - 0.5 * Math.cos((t / BREATH) * Math.PI * 2);
-  const s = 1 + breath * 0.8;
-  orb.scale.setScalar(s);
-  orb.material.emissiveIntensity = 0.8 + breath * 1.2;
-  orbLight.intensity = 2 + breath * 3;
-  halo.material.opacity = 0.08 + breath * 0.12;
-  if (audio) audio.master.gain.setTargetAtTime(0.1 + breath * 0.08, audio.ctx.currentTime, 0.5);
-
-  // Partikel steigen langsam auf und schwanken
-  const pos = particleGeo.attributes.position.array;
-  for (let i = 0; i < COUNT; i++) {
-    pos[i * 3 + 1] += 0.002;
-    if (pos[i * 3 + 1] > 9) pos[i * 3 + 1] = 0.2;
-    pos[i * 3] += Math.sin(t * 0.3 + seeds[i]) * 0.0015;
+function program(vs, fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw fail(gl.getShaderInfoLog(s));
+    gl.attachShader(p, s);
   }
-  particleGeo.attributes.position.needsUpdate = true;
-  particles.rotation.y = t * 0.005;
+  gl.bindAttribLocation(p, 0, 'aPos');
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw fail(gl.getProgramInfoLog(p));
+  const u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const name = gl.getActiveUniform(p, i).name;
+    u[name] = gl.getUniformLocation(p, name);
+  }
+  return { p, u };
+}
 
-  renderer.render(scene, camera);
+function vao(data) {
+  const v = gl.createVertexArray();
+  gl.bindVertexArray(v);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  return v;
+}
+
+const simProg = program(simVS, simFS);
+const sceneProg = program(sceneVS, sceneFS);
+const fullscreen = vao([-1, -1, 3, -1, -1, 3]);
+const h = SCENE.half;
+const quad = vao([-h, -h, h, -h, -h, h, -h, h, h, -h, h, h]);
+
+// ---------- Simulation: Ping-Pong zwischen zwei RG16F-Texturen ----------
+function simTarget() {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG16F, SIM_SIZE, SIM_SIZE, 0, gl.RG, gl.HALF_FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw fail('Sim-Framebuffer unvollständig.');
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  return { tex, fb };
+}
+let simA = simTarget(), simB = simTarget();
+
+function simStep(drive) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, simB.fb);
+  gl.viewport(0, 0, SIM_SIZE, SIM_SIZE);
+  gl.useProgram(simProg.p);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, simA.tex);
+  gl.uniform1i(simProg.u.uState, 0);
+  gl.uniform1f(simProg.u.uK, WAVE_K);
+  gl.uniform1f(simProg.u.uDamp, DAMP);
+  gl.uniform1f(simProg.u.uDrive, drive);
+  gl.uniform1f(simProg.u.uSrc, 0.012);
+  gl.uniform1f(simProg.u.uR, 0.49);
+  gl.uniform1f(simProg.u.uSym, SCENE.sym);
+  gl.uniform1f(simProg.u.uLobe, SCENE.lobe);
+  gl.bindVertexArray(fullscreen);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  [simA, simB] = [simB, simA];
+}
+
+// ---------- Anregung durch Summen ----------
+const hum = new HumDetector();
+let manualHum = false;        // Trigger / Maus / Touch zum Testen ohne Mikro
+let amp = 0, phase = 0, lastT = 0;
+
+function updateWaves(t) {
+  const dt = lastT ? Math.min((t - lastT) / 1000, 0.05) : 1 / 72;
+  lastT = t;
+
+  hum.update();
+  const target = Math.max(hum.level, manualHum ? 0.6 : 0);
+  amp += (target - amp) * 0.1;
+
+  // Tonhöhe -> Wellenlänge: tiefer Ton = lange Wellen, hoher Ton = feine Muster
+  const pitch = manualHum && !hum.level ? 150 : hum.pitch;
+  const u = Math.min(Math.max(Math.log(pitch / 80) / Math.log(400 / 80), 0), 1);
+  const lambda = 48 * Math.pow(12 / 48, u);           // 48 … 12 Texel
+  const freq = Math.sqrt(WAVE_K) / lambda;             // Zyklen pro Schritt
+
+  const steps = Math.min(Math.max(Math.round(dt * SIM_RATE), 1), 12);
+  for (let i = 0; i < steps; i++) {
+    phase += 2 * Math.PI * freq;
+    simStep(amp * Math.sin(phase) * 0.02);
+  }
+
+  if (hum.active) ui.status.textContent =
+    `Mikro: ${(hum.level * 100) | 0}% · ${hum.pitch.toFixed(0)} Hz · Klarheit ${hum.clarity.toFixed(2)}`;
+}
+
+// ---------- Szene zeichnen ----------
+function drawScene(proj, view, cam) {
+  gl.useProgram(sceneProg.p);
+  const u = sceneProg.u;
+  gl.uniformMatrix4fv(u.uProj, false, proj);
+  gl.uniformMatrix4fv(u.uView, false, view);
+  gl.uniform3fv(u.uCenter, SCENE.center);
+  gl.uniform3fv(u.uCam, cam);
+  gl.uniform1f(u.uWaterR, SCENE.waterR);
+  gl.uniform1f(u.uSunR, SCENE.sunR);
+  gl.uniform1f(u.uDepth, SCENE.depth);
+  gl.uniform1f(u.uBump, SCENE.bump);
+  gl.uniform1f(u.uTexel, 1 / SIM_SIZE);
+  gl.uniform1f(u.uHalf, SCENE.half);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, simA.tex);
+  gl.uniform1i(u.uWave, 0);
+  gl.bindVertexArray(quad);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+
+// ---------- 2D-Vorschau (Handy / PC) ----------
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+  return new Float32Array([f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0]);
+}
+const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+let xrSession = null;
+function previewFrame(t) {
+  if (xrSession) return;
+  const dpr = (window.devicePixelRatio || 1) * SUPERSAMPLE;
+  const w = Math.round(canvas.clientWidth * dpr), hgt = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== hgt) { canvas.width = w; canvas.height = hgt; }
+
+  updateWaves(t);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, hgt);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  const aspect = w / hgt;
+  const fovy = aspect < 1 ? 1.6 : 1.0;   // Hochformat: weiter, damit die Scheibe reinpasst
+  drawScene(perspective(fovy, aspect, 0.1, 100), IDENTITY, [0, 0, 0]);
+  requestAnimationFrame(previewFrame);
+}
+requestAnimationFrame(previewFrame);
+
+// Maus / Touch gedrückt halten = Summen simulieren
+canvas.addEventListener('pointerdown', () => { manualHum = true; });
+addEventListener('pointerup', () => { manualHum = false; });
+
+// ---------- Mikrofon ----------
+ui.mic.addEventListener('click', async () => {
+  try {
+    await hum.start();
+    ui.mic.textContent = '🎤 Mikrofon aktiv';
+    ui.mic.disabled = true;
+  } catch (e) {
+    ui.status.textContent = 'Mikrofon nicht verfügbar: ' + e.message;
+  }
 });
 
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+// ---------- WebXR ----------
+let refSpace = null;
+
+async function initXR() {
+  if (!navigator.xr || !(await navigator.xr.isSessionSupported('immersive-vr'))) {
+    ui.vr.textContent = 'VR nicht verfügbar';
+    ui.vr.disabled = true;
+    return;
+  }
+  ui.vr.addEventListener('click', startXR);
+}
+
+async function startXR() {
+  const session = await navigator.xr.requestSession('immersive-vr');
+  xrSession = session;
+  await gl.makeXRCompatible();
+
+  const native = XRWebGLLayer.getNativeFramebufferScaleFactor(session) || 1;
+  const layer = new XRWebGLLayer(session, gl, {
+    antialias: false,
+    depth: false,
+    framebufferScaleFactor: native * SUPERSAMPLE,
+  });
+  session.updateRenderState({ baseLayer: layer, depthNear: 0.1, depthFar: 100 });
+  refSpace = await session.requestReferenceSpace('local');
+
+  ui.status.textContent = `XR-Framebuffer: ${layer.framebufferWidth}×${layer.framebufferHeight} ` +
+    `(Faktor ${(native * SUPERSAMPLE).toFixed(2)})`;
+  console.log(ui.status.textContent);
+
+  session.addEventListener('selectstart', () => { manualHum = true; });
+  session.addEventListener('selectend', () => { manualHum = false; });
+  session.addEventListener('end', () => {
+    xrSession = null;
+    lastT = 0;
+    requestAnimationFrame(previewFrame);
+  });
+  session.requestAnimationFrame(xrFrame);
+}
+
+function xrFrame(t, frame) {
+  const session = frame.session;
+  session.requestAnimationFrame(xrFrame);
+  const pose = frame.getViewerPose(refSpace);
+  if (!pose) return;
+
+  updateWaves(t);
+
+  const layer = session.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  for (const view of pose.views) {
+    const vp = layer.getViewport(view);
+    gl.viewport(vp.x, vp.y, vp.width, vp.height);
+    const p = view.transform.position;
+    drawScene(view.projectionMatrix, view.transform.inverse.matrix, [p.x, p.y, p.z]);
+  }
+}
+
+initXR();
