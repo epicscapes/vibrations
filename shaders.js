@@ -86,6 +86,8 @@ uniform float uDepth;     // Abstand Wasser -> Sonnenebene (m)
 uniform float uBump;      // Stärke der Oberflächen-Normalen
 uniform float uTexel;     // 1 / Simulationsauflösung
 uniform float uHalf;      // halbe Kantenlänge des Quads (m)
+uniform sampler2D uPart;  // Sonnenwind-Partikel (Koordinaten der Sonnenebene)
+uniform float uExtent;    // halbe Kantenlänge der Partikeltextur (m)
 in vec3 vWorld;
 in vec2 vLocal;
 out vec4 o;
@@ -139,6 +141,7 @@ void main() {
   vec2 ps  = vLocal + rr.xy * t;
 
   vec3 col = sun(ps);
+  col += texture(uPart, ps / (2.0 * uExtent) + 0.5).rgb;
 
   // --- Schattierung der Wellen ---
   float slope = length(grad);
@@ -152,3 +155,67 @@ void main() {
 
   o = vec4(col, 1.0);
 }`;
+
+// ---------- Sonnenwind ----------
+// Zustandslose Partikel: Position wird pro Frame aus ID + "Flusszeit" berechnet.
+// uFlow läuft schneller, je lauter gesummt wird -> Partikel werden schneller.
+// Gezeichnet wird in eine eigene Textur in Koordinaten der Sonnenebene;
+// die Szene liest diese Textur am gebrochenen Punkt -> die Partikel liegen
+// hinter dem Wasser und werden von den Wellen mit verzerrt.
+
+export const partVS = `#version 300 es
+uniform float uFlow;     // integrierte Flusszeit (Tempo ~ Lautstärke)
+uniform float uTurb;     // integrierte Turbulenzzeit
+uniform float uLevel;    // aktuelle Lautstärke 0..1
+uniform float uSunR;
+uniform float uExtent;   // halbe Kantenlänge der Partikeltextur (m)
+uniform float uPx;       // Texel pro Meter
+out float vA;
+out vec3 vCol;
+
+float h1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+
+void main() {
+  float id = float(gl_VertexID);
+  float s1 = h1(id), s2 = h1(id + 17.3), s3 = h1(id + 41.7), s4 = h1(id + 73.1);
+
+  float speed = 0.5 + s2;
+  float prog = fract(s1 + uFlow * speed * 0.1);       // 0 = an der Sonne, 1 = verglüht
+
+  float ang = s3 * 6.2831853;
+  float r0 = uSunR * (0.9 + 0.1 * s4);
+  float dist = pow(prog, 1.3) * uSunR * 2.0 * (0.5 + 0.5 * s4);
+  float r = r0 + dist;
+
+  // Turbulenz: seitliches Verwirbeln, wächst mit Abstand und Lautstärke
+  float d = dist / uSunR;
+  float wob = sin(d * 7.0 + uTurb * 0.9 + s2 * 20.0) * 0.6
+            + sin(d * 19.0 - uTurb * 1.7 + s3 * 30.0) * 0.3
+            + sin(d * 41.0 + uTurb * 2.3 + s1 * 50.0) * 0.12;
+  ang += wob * d * 0.25 * (0.5 + uLevel);
+  // leichte Spirale
+  ang += d * 0.15;
+
+  vec2 p = vec2(cos(ang), sin(ang)) * r;
+  gl_Position = vec4(p / uExtent, 0.0, 1.0);
+  gl_PointSize = mix(0.014, 0.006, prog) * uPx;
+
+  vA = smoothstep(0.0, 0.06, prog) * (1.0 - prog) * (0.35 + 0.65 * s4) * (0.45 + 0.9 * uLevel);
+  vCol = mix(vec3(1.0, 0.78, 0.4), vec3(0.85, 0.18, 0.04), smoothstep(0.0, 0.7, prog));
+}`;
+
+export const partFS = `#version 300 es
+precision mediump float;
+in float vA;
+in vec3 vCol;
+out vec4 o;
+void main() {
+  float m = max(1.0 - length(gl_PointCoord * 2.0 - 1.0), 0.0);
+  o = vec4(vCol * vA * m * m, 1.0);
+}`;
+
+// Blendet die Partikeltextur pro Frame etwas aus -> weiche Schweife
+export const fadeFS = `#version 300 es
+precision mediump float;
+out vec4 o;
+void main() { o = vec4(0.0); }`;

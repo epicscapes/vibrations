@@ -1,9 +1,9 @@
 // Vibrations – Vanilla WebGL2 + WebXR (kein Framework)
-import { simVS, simFS, sceneVS, sceneFS } from './shaders.js';
-import { HumDetector } from './audio.js';
+import { simVS, simFS, sceneVS, sceneFS, partVS, partFS, fadeFS } from './shaders.js';
+import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.2.0';
+const VERSION = 'v0.3.0';
 
 // ---------- Einstellungen ----------
 const params = new URLSearchParams(location.search);
@@ -19,6 +19,8 @@ const SCENE = {
   sunR: 0.7,                   // Radius der Sonnenscheibe
   depth: 0.5,                  // Sonne liegt 50 cm hinter dem Wasser
   bump: 3.0,
+  particles: 4000,             // Sonnenwind-Partikel
+  partExtent: 2.2,             // Partikeltextur deckt ±2,2 m der Sonnenebene ab
   sym: 6,                      // Symmetrie der Interferenzmuster
   lobe: 0.08,
 };
@@ -28,6 +30,8 @@ const ui = {
   status: document.getElementById('status'),
   mic: document.getElementById('mic'),
   vr: document.getElementById('vr'),
+  fx: document.getElementById('fx'),
+  volume: document.getElementById('volume'),
 };
 ui.version.textContent = `Vibrations ${VERSION}`;
 
@@ -74,15 +78,18 @@ function vao(data) {
 
 const simProg = program(simVS, simFS);
 const sceneProg = program(sceneVS, sceneFS);
+const partProg = program(partVS, partFS);
+const fadeProg = program(simVS, fadeFS);
+const emptyVao = gl.createVertexArray();
 const fullscreen = vao([-1, -1, 3, -1, -1, 3]);
 const h = SCENE.half;
 const quad = vao([-h, -h, h, -h, -h, h, -h, h, h, -h, h, h]);
 
 // ---------- Simulation: Ping-Pong zwischen zwei RG16F-Texturen ----------
-function simTarget() {
+function simTarget(size = SIM_SIZE, format = gl.RG16F, srcFormat = gl.RG) {
   const tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG16F, SIM_SIZE, SIM_SIZE, 0, gl.RG, gl.HALF_FLOAT, null);
+  gl.texImage2D(gl.TEXTURE_2D, 0, format, size, size, 0, srcFormat, gl.HALF_FLOAT, null);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -96,6 +103,8 @@ function simTarget() {
   return { tex, fb };
 }
 let simA = simTarget(), simB = simTarget();
+const PART_SIZE = 1024;
+const partTarget = simTarget(PART_SIZE, gl.RGBA16F, gl.RGBA);
 
 function simStep(drive) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, simB.fb);
@@ -114,6 +123,39 @@ function simStep(drive) {
   gl.bindVertexArray(fullscreen);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   [simA, simB] = [simB, simA];
+}
+
+// ---------- Sonnenwind ----------
+let flow = 0, turb = 0;
+function drawParticles(dt, level) {
+  flow += dt * (0.25 + level * 2.5);
+  turb += dt * (0.3 + level * 1.5);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, partTarget.fb);
+  gl.viewport(0, 0, PART_SIZE, PART_SIZE);
+  gl.enable(gl.BLEND);
+
+  // alte Partikel ausblenden (Schweife), unabhängig von der Framerate
+  const keep = Math.pow(0.82, dt * 72);
+  gl.blendColor(0, 0, 0, keep);
+  gl.blendFunc(gl.ZERO, gl.CONSTANT_ALPHA);
+  gl.useProgram(fadeProg.p);
+  gl.bindVertexArray(fullscreen);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // neue Partikel additiv
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.useProgram(partProg.p);
+  const u = partProg.u;
+  gl.uniform1f(u.uFlow, flow);
+  gl.uniform1f(u.uTurb, turb);
+  gl.uniform1f(u.uLevel, level);
+  gl.uniform1f(u.uSunR, SCENE.sunR);
+  gl.uniform1f(u.uExtent, SCENE.partExtent);
+  gl.uniform1f(u.uPx, PART_SIZE / (2 * SCENE.partExtent));
+  gl.bindVertexArray(emptyVao);
+  gl.drawArrays(gl.POINTS, 0, SCENE.particles);
+  gl.disable(gl.BLEND);
 }
 
 // ---------- Anregung durch Summen ----------
@@ -141,6 +183,9 @@ function updateWaves(t) {
     simStep(amp * Math.sin(phase) * 0.02);
   }
 
+  if (fx) fx.update(hum.level, hum.pitch);
+  drawParticles(dt, amp);
+
   if (hum.active) ui.status.textContent =
     `Mikro: ${(hum.level * 100) | 0}% · ${hum.pitch.toFixed(0)} Hz · Klarheit ${hum.clarity.toFixed(2)}`;
 }
@@ -162,6 +207,10 @@ function drawScene(proj, view, cam) {
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, simA.tex);
   gl.uniform1i(u.uWave, 0);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, partTarget.tex);
+  gl.uniform1i(u.uPart, 1);
+  gl.uniform1f(u.uExtent, SCENE.partExtent);
   gl.bindVertexArray(quad);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
@@ -196,10 +245,38 @@ requestAnimationFrame(previewFrame);
 canvas.addEventListener('pointerdown', () => { manualHum = true; });
 addEventListener('pointerup', () => { manualHum = false; });
 
-// ---------- Mikrofon ----------
+// ---------- Mikrofon + Stimmeffekte ----------
+let fx = null;
+const fxState = {};
+function load(key, def) { try { const v = localStorage.getItem(key); return v === null ? def : JSON.parse(v); } catch { return def; } }
+function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }
+
+for (const [key, { label, default: def }] of Object.entries(EFFECTS)) {
+  fxState[key] = load('fx.' + key, def);
+  const el = document.createElement('label');
+  el.innerHTML = `<input type="checkbox"> ${label}`;
+  const box = el.querySelector('input');
+  box.checked = fxState[key];
+  box.addEventListener('change', () => {
+    fxState[key] = box.checked;
+    save('fx.' + key, box.checked);
+    if (fx) fx.set(key, box.checked);
+  });
+  ui.fx.appendChild(el);
+}
+ui.volume.value = load('fx.volume', 0.7);
+ui.volume.addEventListener('input', () => {
+  save('fx.volume', +ui.volume.value);
+  if (fx) fx.setVolume(+ui.volume.value);
+});
+
 ui.mic.addEventListener('click', async () => {
   try {
     await hum.start();
+    fx = new VoiceFX(hum.ctx, hum.source);
+    Object.assign(fx.enabled, fxState);
+    await fx.init();
+    fx.setVolume(+ui.volume.value);
     ui.mic.textContent = '🎤 Mikrofon aktiv';
     ui.mic.disabled = true;
   } catch (e) {
