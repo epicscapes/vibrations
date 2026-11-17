@@ -1,15 +1,17 @@
 // Vibrations – Vanilla WebGL2 + WebXR (kein Framework)
-import { simVS, simFS, sceneVS, sceneFS, partVS, partFS, fadeFS } from './shaders.js';
+import { simVS, simFS, sceneVS, sceneFS, partVS, partFS, fadeFS, flyVS, flyFS } from './shaders.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.4.0';
+const VERSION = 'v0.5.0';
 
 // ---------- Einstellungen ----------
 const params = new URLSearchParams(location.search);
 const SUPERSAMPLE = parseFloat(params.get('scale') || '1.5'); // 150 % der nativen Display-Auflösung
-const SIM_SIZE = 512;          // Auflösung der Wellensimulation
-const SIM_RATE = 480;          // Simulationsschritte pro Sekunde
+// Wasser-Auflösung ist im UI einstellbar (siehe SETTINGS); Schritte/s wachsen mit der Auflösung,
+// damit die Wellen in Metern gleich schnell laufen.
+let SIM_SIZE = 512;
+const simRate = () => 480 * SIM_SIZE / 512;
 const WAVE_K = 0.25;           // c² -> 0.5 Texel pro Schritt
 const DAMP = 0.9993;          // geringe Dämpfung -> Wellen erreichen den Rand und reflektieren
 const SCENE = {
@@ -20,7 +22,7 @@ const SCENE = {
   depth: 1.0,                  // Sonne liegt 1 m hinter dem Wasser
   bump: 3.0,
   particles: 6000,             // Sonnenwind-Partikel
-  partExtent: 3.6,             // Partikeltextur deckt ±3,6 m der Sonnenebene ab
+  partExtent: 3.8,             // Partikeltextur deckt ±3,8 m der Sonnenebene ab
   sym: 6,                      // Symmetrie der Interferenzmuster
   lobe: 0.08,
 };
@@ -33,7 +35,24 @@ const ui = {
   fx: document.getElementById('fx'),
   volume: document.getElementById('volume'),
   dry: document.getElementById('dry'),
+  settings: document.getElementById('settings'),
+  panel: document.getElementById('panel'),
+  toggle: document.getElementById('toggle'),
 };
+
+// ---------- Einstellbare Werte (Browser-UI, in localStorage gespeichert) ----------
+function load(key, def) { try { const v = localStorage.getItem(key); return v === null ? def : JSON.parse(v); } catch { return def; } }
+function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }
+
+const SETTINGS = {
+  flyCount: { label: 'Partikel zu mir: Anzahl', min: 0, max: 4000, step: 50, def: 800 },
+  flySize:  { label: 'Partikel zu mir: Größe', min: 0.004, max: 0.06, step: 0.002, def: 0.018 },
+  simRes:   { label: 'Wasser-Auflösung', options: [512, 768, 1024, 1536], def: 768 },
+  waveFreq: { label: 'Wellen-Frequenz', min: 0.5, max: 3, step: 0.1, def: 1.3 },
+};
+const S = {};
+for (const [key, d] of Object.entries(SETTINGS)) S[key] = load('set.' + key, d.def);
+
 ui.version.textContent = `Vibrations ${VERSION}`;
 
 // ---------- WebGL2 ----------
@@ -81,6 +100,7 @@ const simProg = program(simVS, simFS);
 const sceneProg = program(sceneVS, sceneFS);
 const partProg = program(partVS, partFS);
 const fadeProg = program(simVS, fadeFS);
+const flyProg = program(flyVS, flyFS);
 const emptyVao = gl.createVertexArray();
 const fullscreen = vao([-1, -1, 3, -1, -1, 3]);
 const h = SCENE.half;
@@ -103,7 +123,13 @@ function simTarget(size = SIM_SIZE, format = gl.RG16F, srcFormat = gl.RG) {
   gl.clear(gl.COLOR_BUFFER_BIT);
   return { tex, fb };
 }
-let simA = simTarget(), simB = simTarget();
+let simA, simB;
+function setSimRes(size) {
+  for (const t of [simA, simB]) if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
+  SIM_SIZE = size;
+  simA = simTarget(); simB = simTarget();
+}
+setSimRes(S.simRes);
 const PART_SIZE = 1024;
 const partTarget = simTarget(PART_SIZE, gl.RGBA16F, gl.RGBA);
 
@@ -126,11 +152,30 @@ function simStep(drive) {
   [simA, simB] = [simB, simA];
 }
 
+// ---------- Sonne: wächst beim Summen, federnd nachgezogen ----------
+let sunScale = 1, sunVel = 0, sunWob = 0;
+function updateSun(dt, level) {
+  const target = 1 + 0.12 * level;
+  // gedämpfte Feder: leichtes Nachschwingen wirkt organisch
+  sunVel += ((target - sunScale) * 5.0 - sunVel * 2.2) * dt;
+  sunScale += sunVel * dt;
+  // Rand wabert stärker, solange sich die Sonne bewegt bzw. gesummt wird
+  const wobTarget = 0.006 + Math.abs(sunVel) * 0.25 + level * 0.012;
+  sunWob += (wobTarget - sunWob) * Math.min(dt * 2, 1);
+}
+function sunUniforms(u) {
+  gl.uniform1f(u.uSunR, SCENE.sunR);
+  gl.uniform1f(u.uSunScale, sunScale);
+  gl.uniform1f(u.uSunWob, sunWob);
+  gl.uniform1f(u.uClock, clock);
+}
+
 // ---------- Sonnenwind ----------
-let flow = 0, turb = 0, clock = 0;
+let flow = 0, turb = 0, clock = 0, flyFlow = 0;
 function drawParticles(dt, level) {
   flow += dt * (0.6 + level * 2.5);
   turb += dt * (0.4 + level * 1.5);
+  flyFlow += dt * (0.06 + level * 0.35);
   clock += dt;
 
   gl.bindFramebuffer(gl.FRAMEBUFFER, partTarget.fb);
@@ -151,9 +196,8 @@ function drawParticles(dt, level) {
   const u = partProg.u;
   gl.uniform1f(u.uFlow, flow);
   gl.uniform1f(u.uTurb, turb);
-  gl.uniform1f(u.uClock, clock);
   gl.uniform1f(u.uLevel, level);
-  gl.uniform1f(u.uSunR, SCENE.sunR);
+  sunUniforms(u);
   gl.uniform1f(u.uExtent, SCENE.partExtent);
   gl.uniform1f(u.uPx, PART_SIZE / (2 * SCENE.partExtent));
   gl.bindVertexArray(emptyVao);
@@ -177,24 +221,28 @@ function updateWaves(t) {
   // Tonhöhe -> Wellenlänge: tiefer Ton = lange Wellen, hoher Ton = feine Muster
   const pitch = manualHum && !hum.level ? 150 : hum.pitch;
   const u = Math.min(Math.max(Math.log(pitch / 80) / Math.log(400 / 80), 0), 1);
-  const lambda = 48 * Math.pow(12 / 48, u);           // 48 … 12 Texel
+  // 48 … 12 Texel bei 512², skaliert mit Auflösung, geteilt durch die Wellen-Frequenz aus dem UI
+  const lambda = Math.max(48 * Math.pow(12 / 48, u) * (SIM_SIZE / 512) / S.waveFreq, 5);
   const freq = Math.sqrt(WAVE_K) / lambda;             // Zyklen pro Schritt
 
-  const steps = Math.min(Math.max(Math.round(dt * SIM_RATE), 1), 12);
+  const steps = Math.min(Math.max(Math.round(dt * simRate()), 1), 24);
   for (let i = 0; i < steps; i++) {
     phase += 2 * Math.PI * freq;
     simStep(amp * Math.sin(phase) * 0.02);
   }
 
   if (fx) fx.update(hum.level, hum.pitch);
+  updateSun(dt, amp);
   drawParticles(dt, amp);
+  flyLevel = amp;
 
   if (hum.active) ui.status.textContent =
     `Mikro: ${(hum.level * 100) | 0}% · ${hum.pitch.toFixed(0)} Hz · Klarheit ${hum.clarity.toFixed(2)}`;
 }
 
 // ---------- Szene zeichnen ----------
-function drawScene(proj, view, cam) {
+let flyLevel = 0;
+function drawScene(proj, view, cam, vpHeight) {
   gl.useProgram(sceneProg.p);
   const u = sceneProg.u;
   gl.uniformMatrix4fv(u.uProj, false, proj);
@@ -202,9 +250,9 @@ function drawScene(proj, view, cam) {
   gl.uniform3fv(u.uCenter, SCENE.center);
   gl.uniform3fv(u.uCam, cam);
   gl.uniform1f(u.uWaterR, SCENE.waterR);
-  gl.uniform1f(u.uSunR, SCENE.sunR);
+  sunUniforms(u);
   gl.uniform1f(u.uDepth, SCENE.depth);
-  gl.uniform1f(u.uBump, SCENE.bump);
+  gl.uniform1f(u.uBump, SCENE.bump * SIM_SIZE / 512);
   gl.uniform1f(u.uTexel, 1 / SIM_SIZE);
   gl.uniform1f(u.uHalf, SCENE.half);
   gl.activeTexture(gl.TEXTURE0);
@@ -216,6 +264,28 @@ function drawScene(proj, view, cam) {
   gl.uniform1f(u.uExtent, SCENE.partExtent);
   gl.bindVertexArray(quad);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  // Partikel, die auf mich zufliegen (additiv, vor der Wasserebene)
+  const count = S.flyCount | 0;
+  if (count > 0) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.useProgram(flyProg.p);
+    const f = flyProg.u;
+    gl.uniformMatrix4fv(f.uProj, false, proj);
+    gl.uniformMatrix4fv(f.uView, false, view);
+    gl.uniform3fv(f.uCam, cam);
+    gl.uniform3f(f.uFrom, SCENE.center[0], SCENE.center[1], SCENE.center[2]);
+    gl.uniform1f(f.uSunR, SCENE.sunR * sunScale);
+    gl.uniform1f(f.uFlow, flyFlow);
+    gl.uniform1f(f.uTurb, turb);
+    gl.uniform1f(f.uSize, S.flySize);
+    gl.uniform1f(f.uPxScale, proj[5] * vpHeight * 0.5);
+    gl.uniform1f(f.uLevel, flyLevel);
+    gl.bindVertexArray(emptyVao);
+    gl.drawArrays(gl.POINTS, 0, count);
+    gl.disable(gl.BLEND);
+  }
 }
 
 // ---------- 2D-Vorschau (Handy / PC) ----------
@@ -239,7 +309,7 @@ function previewFrame(t) {
   gl.clear(gl.COLOR_BUFFER_BIT);
   const aspect = w / hgt;
   const fovy = aspect < 1 ? 1.6 : 1.0;   // Hochformat: weiter, damit die Scheibe reinpasst
-  drawScene(perspective(fovy, aspect, 0.1, 100), IDENTITY, [0, 0, 0]);
+  drawScene(perspective(fovy, aspect, 0.1, 100), IDENTITY, [0, 0, 0], hgt);
   requestAnimationFrame(previewFrame);
 }
 requestAnimationFrame(previewFrame);
@@ -251,8 +321,32 @@ addEventListener('pointerup', () => { manualHum = false; });
 // ---------- Mikrofon + Stimmeffekte ----------
 let fx = null;
 const fxState = {};
-function load(key, def) { try { const v = localStorage.getItem(key); return v === null ? def : JSON.parse(v); } catch { return def; } }
-function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }
+// Regler für Szene-Einstellungen
+for (const [key, d] of Object.entries(SETTINGS)) {
+  const row = document.createElement('label');
+  const val = document.createElement('span');
+  val.className = 'val';
+  let input;
+  if (d.options) {
+    input = document.createElement('select');
+    for (const o of d.options) input.add(new Option(o === 1536 ? `${o} (schwer)` : String(o), o));
+  } else {
+    input = document.createElement('input');
+    Object.assign(input, { type: 'range', min: d.min, max: d.max, step: d.step });
+  }
+  input.value = S[key];
+  const show = () => { val.textContent = d.options ? '' : (+S[key]).toFixed(d.step < 0.01 ? 3 : d.step < 1 ? 1 : 0); };
+  input.addEventListener('input', () => {
+    S[key] = +input.value;
+    save('set.' + key, S[key]);
+    if (key === 'simRes') setSimRes(S[key]);
+    show();
+  });
+  row.append(d.label + ' ', input, val);
+  ui.settings.appendChild(row);
+  show();
+}
+ui.toggle.addEventListener('click', () => ui.panel.classList.toggle('hidden'));
 
 for (const [key, { label, default: def }] of Object.entries(EFFECTS)) {
   fxState[key] = load('fx.' + key, def);
@@ -349,7 +443,7 @@ function xrFrame(t, frame) {
     const vp = layer.getViewport(view);
     gl.viewport(vp.x, vp.y, vp.width, vp.height);
     const p = view.transform.position;
-    drawScene(view.projectionMatrix, view.transform.inverse.matrix, [p.x, p.y, p.z]);
+    drawScene(view.projectionMatrix, view.transform.inverse.matrix, [p.x, p.y, p.z], vp.height);
   }
 }
 

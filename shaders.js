@@ -59,6 +59,17 @@ void main() {
 
 // Farbe der Sonnenscheibe inkl. Saum und Glow (ohne Grund/Korn) – wird von Szene und Partikeln benutzt
 const SUN_GLSL = `
+uniform float uSunScale;   // Wachstum beim Summen (federnd nachgezogen)
+uniform float uSunWob;     // organische Randverformung
+uniform float uClock;      // Echtzeit in s
+
+// Radius der Sonne in Richtung p: Grundgröße * Wachstum * weich wabernder Rand
+float sunRadius(vec2 p) {
+  float a = atan(p.y, p.x), t = uClock;
+  float w = sin(a * 2.0 + t * 0.7) * 0.5 + sin(a * 3.0 - t * 0.5 + 1.7) * 0.3 + sin(a * 5.0 + t * 1.1 + 4.0) * 0.2;
+  return uSunR * uSunScale * (1.0 + w * uSunWob);
+}
+
 vec3 sunDisc(vec2 p, float R) {
   float d = length(p);
   // Kanalweise leicht unterschiedliche Radien/Weichheit -> schmaler Farbsaum
@@ -119,7 +130,7 @@ float hash(vec2 p) {
 // Die "projizierte Sonne" + dunkelroter Grund + feines Korn
 ${SUN_GLSL}
 vec3 sun(vec2 p) {
-  vec3 col = sunDisc(p, uSunR);
+  vec3 col = sunDisc(p, sunRadius(p));
   col += vec3(0.07, 0.012, 0.006);
   col += (hash(floor(p / uSunR * 245.0)) - 0.5) * 0.03;   // Korn relativ zur Sonnengröße
   return col;
@@ -170,7 +181,6 @@ void main() {
 export const partVS = `#version 300 es
 uniform float uFlow;     // integrierte Flusszeit (Tempo ~ Lautstärke)
 uniform float uTurb;     // integrierte Turbulenzzeit
-uniform float uClock;    // Echtzeit in s (für das langsam wandernde Emissions-Noise)
 uniform float uLevel;    // aktuelle Lautstärke 0..1
 uniform float uSunR;
 uniform float uExtent;   // halbe Kantenlänge der Partikeltextur (m)
@@ -182,12 +192,14 @@ float h1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
 ${SUN_GLSL}
 
 // Emissionsdichte entlang des Sonnenrandes: langsam wanderndes, periodisches Noise
+// (höhere Frequenzen -> kleinere, detailliertere Strähnen)
 float emission(float a, float t) {
-  float n = sin(a * 2.0 + t * 0.21 + 1.3) * 0.5
-          + sin(a * 3.0 - t * 0.17 + 4.1) * 0.35
-          + sin(a * 5.0 + t * 0.29 + 2.2) * 0.25
-          + sin(a * 9.0 - t * 0.37 + 0.7) * 0.15;
-  return n / 1.25 * 0.5 + 0.5;    // grob 0..1
+  float n = sin(a * 7.0  + t * 0.21 + 1.3) * 0.40
+          + sin(a * 13.0 - t * 0.17 + 4.1) * 0.30
+          + sin(a * 23.0 + t * 0.29 + 2.2) * 0.22
+          + sin(a * 37.0 - t * 0.37 + 0.7) * 0.15
+          + sin(a * 61.0 + t * 0.43 + 3.3) * 0.10;
+  return n / 1.17 * 0.5 + 0.5;    // grob 0..1
 }
 
 void main() {
@@ -205,7 +217,9 @@ void main() {
   // Dichtere und leere Bereiche: Partikel an "dünnen" Stellen bleiben unsichtbar
   float dens = smoothstep(0.4, 0.75, emission(ang, uClock));
 
-  float r0 = uSunR * (0.86 + 0.13 * s4);           // Geburt knapp innerhalb des Randes
+  vec2 dir = vec2(cos(ang), sin(ang));
+  float Rb = sunRadius(dir);                       // aktueller (wachsender, wabernder) Sonnenrand
+  float r0 = Rb * (0.86 + 0.13 * s4);              // Geburt knapp innerhalb des Randes
   float dist = pow(prog, 1.2) * uSunR * 1.4 * (0.5 + 0.5 * s4);
   float r = r0 + dist;
 
@@ -221,7 +235,7 @@ void main() {
   gl_PointSize = mix(0.02, 0.009, prog) * uSunR * uPx;
 
   // Farbe = Farbe der Sonne am Geburtsort, glüht dann langsam ins Rot aus
-  vec3 birth = sunDisc(vec2(cos(s3 * 6.2831853), sin(s3 * 6.2831853)) * r0, uSunR);
+  vec3 birth = sunDisc(dir * r0, Rb);
   vCol = mix(birth, birth * vec3(0.85, 0.3, 0.15), smoothstep(0.0, 0.9, prog));
 
   vA = dens * smoothstep(0.0, 0.05, prog) * (1.0 - prog) * (0.3 + 0.7 * s4) * (0.7 + 0.6 * uLevel);
@@ -243,3 +257,65 @@ export const fadeFS = `#version 300 es
 precision mediump float;
 out vec4 o;
 void main() { o = vec4(0.0); }`;
+
+
+// ---------- Partikel, die auf den Betrachter zufliegen ----------
+// Entstehen auf der Sonnenscheibe (an der Wasserebene) und fliegen auf den Startpunkt (0,0,0) zu,
+// leicht aufgefächert und verwirbelt. Tempo ~ Lautstärke. Blenden aus, bevor sie zu nah kommen.
+export const flyVS = `#version 300 es
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform vec3 uCam;
+uniform vec3 uFrom;      // Mittelpunkt der Sonne an der Wasserebene
+uniform float uSunR;
+uniform float uFlow;     // integrierte Flugzeit
+uniform float uTurb;
+uniform float uSize;     // Größe in Metern
+uniform float uPxScale;  // Pixel pro (Meter / Abstand)
+uniform float uLevel;
+out float vA;
+out vec3 vCol;
+
+float h1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+
+void main() {
+  float id = float(gl_VertexID);
+  float s1 = h1(id + 3.1), s2 = h1(id + 11.7);
+  float life = s1 + uFlow * (0.6 + 0.8 * s2);
+  float prog = fract(life);
+  float cyc = floor(life);
+  float a = h1(id * 1.91 + cyc * 5.3) * 6.2831853;
+  float rr = sqrt(h1(id * 3.07 + cyc * 2.9));
+  float s5 = h1(id * 0.77 + cyc * 9.1);
+
+  vec3 start = uFrom + vec3(cos(a), sin(a), 0.0) * rr * uSunR * 0.95;
+  // Ziel: um den Kopf herum aufgefächert, hinter dem Betrachter
+  vec3 target = vec3(cos(a) * (0.6 + 1.6 * s5), sin(a) * (0.4 + 1.2 * s5), 1.5);
+  vec3 p = mix(start, target, prog);
+
+  // Verwirbelung, nimmt zur Mitte der Strecke zu
+  float k = sin(prog * 3.14159);
+  p.x += sin(prog * 9.0 + uTurb + s1 * 30.0) * 0.12 * k;
+  p.y += sin(prog * 7.0 - uTurb * 1.3 + s2 * 40.0) * 0.12 * k;
+
+  vec4 vp = uView * vec4(p, 1.0);
+  gl_Position = uProj * vp;
+  float dist = max(-vp.z, 0.05);
+  gl_PointSize = clamp(uSize * (0.6 + 0.8 * s5) * uPxScale / dist, 1.0, 48.0);
+
+  float camDist = length(p - uCam);
+  vA = smoothstep(0.0, 0.08, prog)                  // einblenden an der Sonne
+     * smoothstep(0.8, 2.2, camDist)                // ausblenden kurz vor der Kamera
+     * (0.25 + 0.5 * s5) * (0.5 + 0.7 * uLevel);
+  vCol = mix(vec3(1.0, 0.62, 0.26), vec3(0.95, 0.3, 0.08), s5);
+}`;
+
+export const flyFS = `#version 300 es
+precision mediump float;
+in float vA;
+in vec3 vCol;
+out vec4 o;
+void main() {
+  float m = max(1.0 - length(gl_PointCoord * 2.0 - 1.0), 0.0);
+  o = vec4(vCol * vA * m * m, 1.0);
+}`;
