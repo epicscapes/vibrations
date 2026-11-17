@@ -9,34 +9,36 @@
     canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
     #version { position: fixed; top: 10px; left: 12px; font-size: 13px; opacity: .7; z-index: 10; }
     #status { position: fixed; top: 30px; left: 12px; font-size: 12px; opacity: .6; z-index: 10; }
-    #controls { position: fixed; bottom: 24px; left: 0; right: 0; display: flex; gap: 12px; justify-content: center; z-index: 10; }
+    #controls { position: fixed; bottom: 20px; left: 0; right: 0; display: flex; gap: 12px; justify-content: center; z-index: 10; }
     button { font: inherit; font-size: 16px; padding: 12px 20px; border-radius: 24px; border: 1px solid #e8b48a66;
              background: #1a0805cc; color: #f3c79c; cursor: pointer; }
     button:disabled { opacity: .5; cursor: default; }
-    #panel { position: fixed; bottom: 84px; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; gap: 10px; z-index: 10; }
-    #fx { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 92vw; }
-    #fx label { font-size: 14px; padding: 8px 12px; border-radius: 18px; border: 1px solid #e8b48a44; background: #1a0805cc; user-select: none; }
-    #fx input { accent-color: #f08a3a; vertical-align: -2px; }
-    #vol { font-size: 13px; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 10px; align-items: center; opacity: .85; }
-    #vol input { accent-color: #f08a3a; width: 110px; margin-right: 8px; }
-    #settings { display: grid; grid-template-columns: 1fr; gap: 6px; font-size: 13px; }
-    #settings label { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
-    #settings input { accent-color: #f08a3a; width: 150px; }
-    #settings select { font: inherit; background: #1a0805; color: #f3c79c; border: 1px solid #e8b48a66; border-radius: 8px; padding: 2px 6px; }
-    #settings .val { width: 44px; text-align: right; opacity: .7; }
+
+    /* Einstellungen: rechts als Spalte, auf schmalen Bildschirmen unten als Blatt */
+    #panel { position: fixed; top: 12px; right: 12px; width: 330px; max-height: calc(100% - 100px); overflow-y: auto;
+             display: flex; flex-direction: column; gap: 8px; z-index: 10; font-size: 13px; }
     #panel.hidden { display: none; }
+    @media (max-width: 640px) {
+      #panel { top: auto; bottom: 80px; left: 8px; right: 8px; width: auto; max-height: 52%; }
+    }
+    details { background: #140604e6; border: 1px solid #e8b48a33; border-radius: 14px; }
+    summary { padding: 10px 14px; cursor: pointer; font-size: 14px; color: #f3c79c; user-select: none; }
+    details .body { padding: 2px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+    .row { display: grid; grid-template-columns: 1fr 130px 46px; gap: 8px; align-items: center; }
+    .row input[type=range] { width: 100%; accent-color: #f08a3a; }
+    .row input[type=checkbox] { accent-color: #f08a3a; justify-self: start; width: 18px; height: 18px; }
+    .row select { font: inherit; background: #1a0805; color: #f3c79c; border: 1px solid #e8b48a66; border-radius: 8px; padding: 3px 6px; }
+    .val { text-align: right; opacity: .7; font-variant-numeric: tabular-nums; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { padding: 6px 10px; border-radius: 16px; border: 1px solid #e8b48a44; background: #1a0805; user-select: none; }
+    .chip input { accent-color: #f08a3a; vertical-align: -2px; }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <div id="version"></div>
   <div id="status">Gedrückt halten = Summen simulieren</div>
-  <div id="panel">
-    <div id="fx"></div>
-    <div id="vol">Effekte <input id="volume" type="range" min="0" max="1.5" step="0.05">
-      Eigene Stimme <input id="dry" type="range" min="0" max="1.5" step="0.05"></div>
-    <div id="settings"></div>
-  </div>
+  <div id="panel"></div>
   <div id="controls">
     <button id="toggle">⚙︎</button>
     <button id="mic">🎤 Mikrofon aktivieren</button>

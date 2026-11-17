@@ -2,7 +2,7 @@
 
 // ---------- Wellensimulation ----------
 // Zustand in einer RG16F-Textur: R = aktuelle Höhe, G = vorherige Höhe.
-// Diskrete 2D-Wellengleichung, kreisförmiger Behälter mit festem Rand (h = 0)
+// Diskrete 2D-Wellengleichung in einem Behälter mit festem Rand (h = 0)
 // -> Wellen werden an der Peripherie reflektiert und bilden stehende Muster (Cymatics).
 
 export const simVS = `#version 300 es
@@ -18,17 +18,27 @@ precision highp float;
 uniform sampler2D uState;
 uniform float uK;       // c^2 (Wellengeschwindigkeit², stabil bis 0.5)
 uniform float uDamp;    // Dämpfung der Geschwindigkeit pro Schritt
-uniform float uDrive;   // aktuelle Anregung im Zentrum
-uniform float uSrc;     // Radius der Anregungsquelle (in UV)
-uniform float uR;       // Radius des Behälters (in UV)
-uniform float uSym;     // Symmetrie des Randes (z. B. 6 -> sechszählige Muster)
-uniform float uLobe;    // wie stark der Rand von der Kreisform abweicht
+uniform float uDrive;   // aktuelle Anregung
+uniform vec2  uSrcPos;  // Ort der Anregung (UV), kann dem Blick folgen
+uniform float uSrc;     // Radius der Anregungsquelle (UV)
+uniform float uR;       // Umkreisradius des Behälters (UV)
+uniform float uShape;   // 0 = Kreis, 3..8 = n-Eck, 100+n = Blüte mit n Blättern
+uniform float uLobe;    // Tiefe der Blütenblätter
 in vec2 vUv;
 out vec4 o;
 
 float H(ivec2 p, ivec2 size) {
   p = clamp(p, ivec2(0), size - 1);
   return texelFetch(uState, p, 0).r;
+}
+
+// Abstand vom Mittelpunkt zum Rand in Richtung th
+float boundary(float th) {
+  if (uShape < 0.5) return uR;
+  if (uShape > 99.0) return uR * (1.0 - uLobe * 0.5 * (1.0 + cos((uShape - 100.0) * th)));
+  float seg = 6.2831853 / uShape;
+  float a = mod(th - 1.5707963, seg) - seg * 0.5;   // eine Ecke zeigt nach oben
+  return uR * cos(3.14159265 / uShape) / cos(a);
 }
 
 void main() {
@@ -42,23 +52,18 @@ void main() {
 
   float n = h + (h - prev) * uDamp + uK * lap;
 
-  vec2 c = vUv - 0.5;
-  float r2 = dot(c, c);
-  n += uDrive * exp(-r2 / (uSrc * uSrc));
+  vec2 ds = vUv - uSrcPos;
+  n += uDrive * exp(-dot(ds, ds) / (uSrc * uSrc));
 
-  // Reflektierender Rand: außerhalb des Kreises ist die Oberfläche fixiert
-  // Leicht gewellter Rand bricht die perfekte Rotationssymmetrie,
-  // dadurch entstehen blütenartige Interferenzmuster wie bei Cymatics.
-  float th = atan(c.y, c.x);
-  float rb = uR * (1.0 - uLobe * 0.5 * (1.0 + cos(uSym * th)));
-  if (sqrt(r2) > rb) n = 0.0;
+  vec2 c = vUv - 0.5;
+  if (length(c) > boundary(atan(c.y, c.x))) n = 0.0;
 
   o = vec4(clamp(n, -4.0, 4.0), h, 0.0, 1.0);
 }`;
 
-
-// Farbe der Sonnenscheibe inkl. Saum und Glow (ohne Grund/Korn) – wird von Szene und Partikeln benutzt
+// ---------- Sonne (gemeinsam für Szene und Corona) ----------
 const SUN_GLSL = `
+uniform float uSunR;
 uniform float uSunScale;   // Wachstum beim Summen (federnd nachgezogen)
 uniform float uSunWob;     // organische Randverformung
 uniform float uClock;      // Echtzeit in s
@@ -70,10 +75,15 @@ float sunRadius(vec2 p) {
   return uSunR * uSunScale * (1.0 + w * uSunWob);
 }
 
+// Wie stark die Scheibe an p deckt (für Partikel hinter der Sonne)
+float sunCover(vec2 p) {
+  float R = sunRadius(p);
+  return 1.0 - smoothstep(R * 0.985, R * 1.01, length(p));
+}
+
 vec3 sunDisc(vec2 p, float R) {
   float d = length(p);
   // Kanalweise leicht unterschiedliche Radien/Weichheit -> schmaler Farbsaum
-  // (Blau verschwindet zuerst, dann Grün, Rot reicht am weitesten -> gelb -> orange -> rot)
   vec3 radii = R * vec3(1.008, 1.0, 0.992);
   vec3 soft  = R * vec3(0.022, 0.014, 0.010);
   vec3 mask  = 1.0 - smoothstep(radii - soft, radii + soft, vec3(d));
@@ -87,9 +97,9 @@ vec3 sunDisc(vec2 p, float R) {
 
 // ---------- Szene ----------
 // Ein großes Quad im Raum = die transparente Wasserebene.
-// Die Sonnenscheibe liegt "dahinter" auf einer virtuellen Ebene (uDepth Meter tiefer).
-// Pro Pixel: Sichtstrahl -> an der Wasseroberfläche gebrochen -> trifft die Sonnenebene.
-// Dadurch gibt es echte Parallaxe und die Sonne wird von den Wellen verzerrt.
+// Die Sonne liegt "dahinter" (uDepth Meter). Pro Pixel: Sichtstrahl -> an der Wasseroberfläche
+// gebrochen -> trifft die Sonnenebene. Die Corona liegt in drei Tiefenebenen
+// (vor, auf und hinter der Sonnenebene) -> echte Parallaxe in VR.
 
 export const sceneVS = `#version 300 es
 in vec2 aPos;           // lokale Position in Metern
@@ -110,13 +120,15 @@ precision highp float;
 uniform sampler2D uWave;
 uniform vec3  uCam;       // Augenposition
 uniform float uWaterR;    // Radius des Wasserbehälters (m)
-uniform float uSunR;      // Radius der Sonnenscheibe (m)
 uniform float uDepth;     // Abstand Wasser -> Sonnenebene (m)
 uniform float uBump;      // Stärke der Oberflächen-Normalen
 uniform float uTexel;     // 1 / Simulationsauflösung
 uniform float uHalf;      // halbe Kantenlänge des Quads (m)
-uniform sampler2D uPart;  // Sonnenwind-Partikel (Koordinaten der Sonnenebene)
-uniform float uExtent;    // halbe Kantenlänge der Partikeltextur (m)
+uniform sampler2D uPart0; // Corona vor der Sonne
+uniform sampler2D uPart1; // Corona auf der Sonnenebene
+uniform sampler2D uPart2; // Corona hinter der Sonne
+uniform vec3  uLayerOff;  // Tiefenversatz der drei Ebenen relativ zur Sonnenebene (m)
+uniform float uExtent;    // halbe Kantenlänge der Partikeltexturen (m)
 in vec3 vWorld;
 in vec2 vLocal;
 out vec4 o;
@@ -127,13 +139,19 @@ float hash(vec2 p) {
   return fract(p.x * p.y);
 }
 
-// Die "projizierte Sonne" + dunkelroter Grund + feines Korn
 ${SUN_GLSL}
+
 vec3 sun(vec2 p) {
   vec3 col = sunDisc(p, sunRadius(p));
   col += vec3(0.07, 0.012, 0.006);
   col += (hash(floor(p / uSunR * 245.0)) - 0.5) * 0.03;   // Korn relativ zur Sonnengröße
   return col;
+}
+
+vec4 layer(sampler2D tex, vec3 rr, float depth) {
+  float t = depth / max(-rr.z, 0.05);
+  vec2 p = vLocal + rr.xy * t;
+  return texture(tex, p / (2.0 * uExtent) + 0.5);
 }
 
 void main() {
@@ -153,10 +171,16 @@ void main() {
   vec2 ps  = vLocal + rr.xy * t;
 
   vec3 col = sun(ps);
-  // Partikel liegen "über" der Sonne (vormultipliziert), nicht additiv:
-  // an ihrem Entstehungsort haben sie die Farbe der Sonne und verschmelzen mit ihr.
-  vec4 part = texture(uPart, ps / (2.0 * uExtent) + 0.5);
-  col = col * (1.0 - min(part.a, 1.0)) + part.rgb;
+
+  // Corona-Ebenen, von hinten nach vorne "über" die Szene komponiert (vormultipliziert).
+  // Die hintere Ebene wird von der Sonnenscheibe verdeckt.
+  vec4 back = layer(uPart2, rr, uDepth + uLayerOff.z);
+  float vis = 1.0 - sunCover(ps);
+  col = col * (1.0 - min(back.a, 1.0) * vis) + back.rgb * vis;
+  vec4 mid = layer(uPart1, rr, uDepth + uLayerOff.y);
+  col = col * (1.0 - min(mid.a, 1.0)) + mid.rgb;
+  vec4 front = layer(uPart0, rr, uDepth + uLayerOff.x);
+  col = col * (1.0 - min(front.a, 1.0)) + front.rgb;
 
   // --- Schattierung der Wellen ---
   float slope = length(grad);
@@ -165,45 +189,45 @@ void main() {
   col += vec3(0.45, 0.10, 0.03) * max(lit, 0.0) * 0.6;        // warme Lichtkanten
 
   // --- Vignette: Quad-Rand verschwindet im Schwarz ---
-  float v = smoothstep(uHalf, uHalf * 0.35, length(vLocal));
-  col *= v;
+  col *= smoothstep(uHalf, uHalf * 0.35, length(vLocal));
 
   o = vec4(col, 1.0);
 }`;
 
-// ---------- Sonnenwind ----------
+// ---------- Corona ----------
 // Zustandslose Partikel: Position wird pro Frame aus ID + "Flusszeit" berechnet.
-// uFlow läuft schneller, je lauter gesummt wird -> Partikel werden schneller.
-// Gezeichnet wird in eine eigene Textur in Koordinaten der Sonnenebene;
-// die Szene liest diese Textur am gebrochenen Punkt -> die Partikel liegen
-// hinter dem Wasser und werden von den Wellen mit verzerrt.
+// Gezeichnet in eine Textur pro Tiefenebene; die Textur wird pro Frame nur teilweise
+// gelöscht -> kurze Schweife. Die Szene liest sie am gebrochenen Punkt.
 
 export const partVS = `#version 300 es
 uniform float uFlow;     // integrierte Flusszeit (Tempo ~ Lautstärke)
 uniform float uTurb;     // integrierte Turbulenzzeit
 uniform float uLevel;    // aktuelle Lautstärke 0..1
-uniform float uSunR;
 uniform float uExtent;   // halbe Kantenlänge der Partikeltextur (m)
 uniform float uPx;       // Texel pro Meter
+uniform float uIdOffset; // trennt die Partikel der drei Ebenen
+uniform float uSizeMul;  // Größe aus dem UI
+uniform float uNoise;    // Frequenz-Faktor des Emissions-Noise (größer = feiner)
 out float vA;
 out vec3 vCol;
 
 float h1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
 ${SUN_GLSL}
 
-// Emissionsdichte entlang des Sonnenrandes: langsam wanderndes, periodisches Noise
-// (höhere Frequenzen -> kleinere, detailliertere Strähnen)
+// Emissionsdichte entlang des Sonnenrandes: langsam wanderndes, periodisches Noise.
+// Frequenzen werden auf ganze Zahlen gerundet, damit es rundherum nahtlos bleibt.
 float emission(float a, float t) {
-  float n = sin(a * 7.0  + t * 0.21 + 1.3) * 0.40
-          + sin(a * 13.0 - t * 0.17 + 4.1) * 0.30
-          + sin(a * 23.0 + t * 0.29 + 2.2) * 0.22
-          + sin(a * 37.0 - t * 0.37 + 0.7) * 0.15
-          + sin(a * 61.0 + t * 0.43 + 3.3) * 0.10;
-  return n / 1.17 * 0.5 + 0.5;    // grob 0..1
+  float k = uNoise;
+  float n = sin(a * floor(7.0 * k + 0.5)  + t * 0.21 + 1.3) * 0.40
+          + sin(a * floor(13.0 * k + 0.5) - t * 0.17 + 4.1) * 0.30
+          + sin(a * floor(23.0 * k + 0.5) + t * 0.29 + 2.2) * 0.22
+          + sin(a * floor(37.0 * k + 0.5) - t * 0.37 + 0.7) * 0.15
+          + sin(a * floor(61.0 * k + 0.5) + t * 0.43 + 3.3) * 0.10;
+  return n / 1.17 * 0.5 + 0.5;
 }
 
 void main() {
-  float id = float(gl_VertexID);
+  float id = float(gl_VertexID) + uIdOffset;
   float s1 = h1(id), s2 = h1(id + 17.3);
 
   float speed = 0.6 + 0.8 * s2;
@@ -214,11 +238,10 @@ void main() {
   float s4 = h1(id * 2.11 + cycle * 3.17 + 5.0);
 
   float ang = s3 * 6.2831853;
-  // Dichtere und leere Bereiche: Partikel an "dünnen" Stellen bleiben unsichtbar
   float dens = smoothstep(0.4, 0.75, emission(ang, uClock));
 
   vec2 dir = vec2(cos(ang), sin(ang));
-  float Rb = sunRadius(dir);                       // aktueller (wachsender, wabernder) Sonnenrand
+  float Rb = sunRadius(dir);
   float r0 = Rb * (0.86 + 0.13 * s4);              // Geburt knapp innerhalb des Randes
   float dist = pow(prog, 1.2) * uSunR * 1.4 * (0.5 + 0.5 * s4);
   float r = r0 + dist;
@@ -232,7 +255,7 @@ void main() {
 
   vec2 p = vec2(cos(ang), sin(ang)) * r;
   gl_Position = vec4(p / uExtent, 0.0, 1.0);
-  gl_PointSize = mix(0.02, 0.009, prog) * uSunR * uPx;
+  gl_PointSize = max(mix(0.02, 0.009, prog) * uSunR * uPx * uSizeMul, 1.0);
 
   // Farbe = Farbe der Sonne am Geburtsort, glüht dann langsam ins Rot aus
   vec3 birth = sunDisc(dir * r0, Rb);
@@ -258,11 +281,12 @@ precision mediump float;
 out vec4 o;
 void main() { o = vec4(0.0); }`;
 
-
 // ---------- Partikel, die auf den Betrachter zufliegen ----------
-// Entstehen auf der Sonnenscheibe (an der Wasserebene) und fliegen auf den Startpunkt (0,0,0) zu,
-// leicht aufgefächert und verwirbelt. Tempo ~ Lautstärke. Blenden aus, bevor sie zu nah kommen.
-export const flyVS = `#version 300 es
+// Entstehen auf der Sonnenscheibe (an der Wasserebene) und fliegen aufgefächert auf den
+// Startpunkt (0,0,0) zu. Tempo ~ Lautstärke. Kopf = runder Punkt, dahinter ein
+// schlängelnder, spitz zulaufender Schweif aus mehreren Segmenten (entlang der Flugbahn).
+
+const FLY_GLSL = `
 uniform mat4 uProj;
 uniform mat4 uView;
 uniform vec3 uCam;
@@ -270,44 +294,58 @@ uniform vec3 uFrom;      // Mittelpunkt der Sonne an der Wasserebene
 uniform float uSunR;
 uniform float uFlow;     // integrierte Flugzeit
 uniform float uTurb;
+uniform float uClock;
 uniform float uSize;     // Größe in Metern
 uniform float uPxScale;  // Pixel pro (Meter / Abstand)
 uniform float uLevel;
-out float vA;
-out vec3 vCol;
 
 float h1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
 
-void main() {
-  float id = float(gl_VertexID);
-  float s1 = h1(id + 3.1), s2 = h1(id + 11.7);
-  float life = s1 + uFlow * (0.6 + 0.8 * s2);
-  float prog = fract(life);
+struct Fly { float prog; float s1; float s2; float s5; float a; float rr; };
+
+Fly flyState(float id) {
+  Fly f;
+  f.s1 = h1(id + 3.1); f.s2 = h1(id + 11.7);
+  float life = f.s1 + uFlow * (0.6 + 0.8 * f.s2);
+  f.prog = fract(life);
   float cyc = floor(life);
-  float a = h1(id * 1.91 + cyc * 5.3) * 6.2831853;
-  float rr = sqrt(h1(id * 3.07 + cyc * 2.9));
-  float s5 = h1(id * 0.77 + cyc * 9.1);
+  f.a  = h1(id * 1.91 + cyc * 5.3) * 6.2831853;
+  f.rr = sqrt(h1(id * 3.07 + cyc * 2.9));
+  f.s5 = h1(id * 0.77 + cyc * 9.1);
+  return f;
+}
 
-  vec3 start = uFrom + vec3(cos(a), sin(a), 0.0) * rr * uSunR * 0.95;
-  // Ziel: um den Kopf herum aufgefächert, hinter dem Betrachter
-  vec3 target = vec3(cos(a) * (0.6 + 1.6 * s5), sin(a) * (0.4 + 1.2 * s5), 1.5);
+vec3 flyPos(Fly f, float prog) {
+  vec3 start = uFrom + vec3(cos(f.a), sin(f.a), 0.0) * f.rr * uSunR * 0.95;
+  vec3 target = vec3(cos(f.a) * (0.6 + 1.6 * f.s5), sin(f.a) * (0.4 + 1.2 * f.s5), 1.5);
   vec3 p = mix(start, target, prog);
-
-  // Verwirbelung, nimmt zur Mitte der Strecke zu
   float k = sin(prog * 3.14159);
-  p.x += sin(prog * 9.0 + uTurb + s1 * 30.0) * 0.12 * k;
-  p.y += sin(prog * 7.0 - uTurb * 1.3 + s2 * 40.0) * 0.12 * k;
+  p.x += sin(prog * 9.0 + uTurb + f.s1 * 30.0) * 0.12 * k;
+  p.y += sin(prog * 7.0 - uTurb * 1.3 + f.s2 * 40.0) * 0.12 * k;
+  return p;
+}
 
+float flyAlpha(Fly f, vec3 p) {
+  return smoothstep(0.0, 0.08, f.prog)               // einblenden an der Sonne
+       * smoothstep(0.8, 2.2, length(p - uCam))       // ausblenden kurz vor der Kamera
+       * (0.25 + 0.5 * f.s5) * (0.5 + 0.7 * uLevel);
+}
+
+vec3 flyColor(Fly f) { return mix(vec3(1.0, 0.62, 0.26), vec3(0.95, 0.3, 0.08), f.s5); }
+`;
+
+export const flyVS = `#version 300 es
+${FLY_GLSL}
+out float vA;
+out vec3 vCol;
+void main() {
+  Fly f = flyState(float(gl_VertexID));
+  vec3 p = flyPos(f, f.prog);
   vec4 vp = uView * vec4(p, 1.0);
   gl_Position = uProj * vp;
-  float dist = max(-vp.z, 0.05);
-  gl_PointSize = clamp(uSize * (0.6 + 0.8 * s5) * uPxScale / dist, 1.0, 48.0);
-
-  float camDist = length(p - uCam);
-  vA = smoothstep(0.0, 0.08, prog)                  // einblenden an der Sonne
-     * smoothstep(0.8, 2.2, camDist)                // ausblenden kurz vor der Kamera
-     * (0.25 + 0.5 * s5) * (0.5 + 0.7 * uLevel);
-  vCol = mix(vec3(1.0, 0.62, 0.26), vec3(0.95, 0.3, 0.08), s5);
+  gl_PointSize = clamp(uSize * (0.6 + 0.8 * f.s5) * uPxScale / max(-vp.z, 0.05), 1.0, 48.0);
+  vA = flyAlpha(f, p);
+  vCol = flyColor(f);
 }`;
 
 export const flyFS = `#version 300 es
@@ -318,4 +356,67 @@ out vec4 o;
 void main() {
   float m = max(1.0 - length(gl_PointCoord * 2.0 - 1.0), 0.0);
   o = vec4(vCol * vA * m * m, 1.0);
+}`;
+
+export const TAIL_SEGMENTS = 6;
+
+export const tailVS = `#version 300 es
+${FLY_GLSL}
+uniform float uTail;     // Schweiflänge (Anteil der Flugstrecke)
+uniform vec2  uVp;       // Viewport in Pixeln
+out float vA;
+out vec3 vCol;
+out float vU;            // 0 = Schweifende, 1 = am Kopf
+out float vV;            // -1..1 quer zum Schweif
+
+const int SEG = ${TAIL_SEGMENTS};
+
+void main() {
+  int per = SEG * 6;
+  int vid = gl_VertexID;
+  float id = float(vid / per);
+  int local = vid - (vid / per) * per;
+  int seg = local / 6;
+  int corner = local - seg * 6;
+  // zwei Dreiecke pro Segment
+  int e = (corner == 1 || corner == 2 || corner == 4) ? 1 : 0;
+  float side = (corner == 2 || corner == 4 || corner == 5) ? 1.0 : -1.0;
+  float u = float(seg + e) / float(SEG);
+
+  Fly f = flyState(id);
+  float pr = max(f.prog - uTail * (1.0 - u), 0.0);
+  vec3 P  = flyPos(f, pr);
+  vec3 P2 = flyPos(f, pr + 0.003);
+
+  mat4 vpm = uProj * uView;
+  vec4 c1 = vpm * vec4(P, 1.0);
+  vec4 c2 = vpm * vec4(P2, 1.0);
+  vec2 d = (c2.xy / c2.w - c1.xy / c1.w) * uVp;
+  vec2 dir = length(d) > 1e-4 ? normalize(d) : vec2(1.0, 0.0);
+  vec2 perp = vec2(-dir.y, dir.x);
+
+  float headPx = clamp(uSize * (0.6 + 0.8 * f.s5) * uPxScale / max(c1.w, 0.05), 1.0, 48.0);
+  float wPx = headPx * 0.35 * mix(0.15, 1.0, u * u);
+  // Schlängeln wie ein Spermium: seitliche Welle, zum Ende hin stärker
+  float wig = sin(u * 9.0 - uClock * 10.0 + f.s1 * 40.0) * (1.0 - u) * headPx * 0.6;
+
+  c1.xy += perp * (side * wPx + wig) * 2.0 / uVp * c1.w;
+  gl_Position = c1;
+
+  vU = u;
+  vV = side;
+  vA = flyAlpha(f, P) * smoothstep(0.0, 0.02, f.prog - uTail * (1.0 - u));
+  vCol = flyColor(f);
+}`;
+
+export const tailFS = `#version 300 es
+precision mediump float;
+in float vA;
+in vec3 vCol;
+in float vU;
+in float vV;
+out vec4 o;
+void main() {
+  float a = vA * (1.0 - vV * vV) * pow(vU, 1.5) * 0.7;
+  o = vec4(vCol * a, 1.0);
 }`;

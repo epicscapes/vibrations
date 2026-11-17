@@ -4,6 +4,7 @@ export class HumDetector {
   constructor() {
     this.active = false;
     this.level = 0;      // geglättete Lautstärke 0..1, nur wenn gesummt wird
+    this.rms = 0;        // rohe Lautstärke (für das Stimm-Gate)
     this.pitch = 150;    // geglättete Tonhöhe in Hz
     this.clarity = 0;
     this._frame = 0;
@@ -32,7 +33,8 @@ export class HumDetector {
     // Tonhöhenanalyse nur jeden 2. Frame (spart CPU auf der Quest)
     if (this._frame++ % 2 === 0) this._analyse();
 
-    const target = this._humming ? Math.min(this._rms * 12, 1) : 0;
+    // lineare Lautstärke 0..1 (die Dynamik-Kurve für die Wellen wird in main.js angewendet)
+    const target = this._humming ? Math.min(this._rms * 8, 1) : 0;
     // schnell an, langsam aus
     const k = target > this.level ? 0.15 : 0.05;
     this.level += (target - this.level) * k;
@@ -46,6 +48,7 @@ export class HumDetector {
     let e = 0;
     for (let i = 0; i < N; i++) e += x[i] * x[i];
     this._rms = Math.sqrt(e / N);
+    this.rms = this._rms;
     if (this._rms < 0.008) { this._humming = false; this.clarity = 0; return; }
 
     // Autokorrelation für 70–500 Hz
@@ -206,10 +209,18 @@ export class VoiceFX {
   }
 
   // pro Frame: Gate und Obertöne an Summen koppeln
-  update(level, pitch) {
+  // Gate-Schwelle (RMS). Niedrig = Stimme setzt weich ein, aber leise Umgebung kommt eher durch.
+  setGateThreshold(v) { this.gateThr = v; }
+
+  update(level, pitch, rms = 0) {
     if (!this.ready) return;
     const now = this.ctx.currentTime;
-    this.gate.gain.setTargetAtTime(Math.min(level * 2.5, 1), now, 0.05);
+    // Gate folgt der rohen Lautstärke: schnell auf, langsam zu -> nicht abgehackt
+    const thr = this.gateThr ?? 0.003;
+    const x = Math.min(Math.max((rms - thr) / (thr * 1.5), 0), 1);
+    const open = x * x * (3 - 2 * x);
+    const cur = this.gate.gain.value;
+    this.gate.gain.setTargetAtTime(open, now, open > cur ? 0.015 : 0.35);
     const h = this.enabled.harmony ? level * 0.25 : 0;
     this.harmonyGain.gain.setTargetAtTime(h, now, h > this._harmonyLevel ? 0.6 : 1.5);
     this._harmonyLevel = h;

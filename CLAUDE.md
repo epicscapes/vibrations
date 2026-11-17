@@ -22,24 +22,23 @@ Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Qu
 - Nutzer steht/sitzt still; keine künstliche Fortbewegung.
 - Performance: Quest 3 soll stabil 72–90 fps halten. Wenige Lichter, sparsame Partikel, keine Post-Processing-Ketten.
 
-## Aktueller Stand (v0.5.0) – Szene „Sonne & Wasser“
+## Aktueller Stand (v0.6.0) – Szene „Sonne & Wasser“
 - Look nach Referenz: orange Sonnenscheibe wie eine Projektion, schmaler chromatischer Rand (gelb → orange → rot), gesättigter roter Glow, dunkelroter Grund mit feinem Korn.
-- Davor eine transparente, brechende Wasserebene (Quad 16 × 16 m, 5 m vor dem Nutzer, Wasserbehälter-Radius 3 m, Sonnenradius 1,4 m). Die Sonne liegt 1 m dahinter und wird per Raytracing-Brechung im Shader verzerrt (inkl. Parallaxe).
-- Sonne wächst beim Summen um bis zu 12 % (gedämpfte Feder, leichtes Nachschwingen); Rand wabert organisch (`sunRadius()` in `SUN_GLSL`, Uniforms `uSunScale`, `uSunWob`).
-- Wellen: 2D-Wellengleichung auf der GPU (RG16F Ping-Pong). Auflösung im UI 512–1536 (Standard 768), Schritte/s = 480 × Auflösung/512. „Wellen-Frequenz“ im UI verkürzt die Wellenlänge (min. 5 Texel). Anregung im Zentrum, Rand reflektiert.
-  Rand leicht sechszählig gewellt (`sym`, `lobe`) → blütenartige Interferenzmuster wie Cymatics.
-- Summen ins Mikro regt die Wellen an: Lautstärke = Amplitude, Tonhöhe (Autokorrelation 70–500 Hz) = Wellenlänge.
-- Sonnenwind: 6000 zustandslose GPU-Partikel strömen turbulent von der Sonne weg, Tempo und Turbulenz steigen mit der Lautstärke.
-  Jede Lebensrunde neuer Geburtsort; Emission entlang des Randes über langsam wanderndes, feines Noise (Frequenzen 7–61) -> schmale dichtere Strähnen.
-  Bei der Geburt haben sie die Farbe der Sonne an dieser Stelle (gemeinsame GLSL-Funktion `sunDisc`) und glühen ins Rot aus.
-  Gezeichnet in eine eigene Textur (Sonnenebene, vormultipliziert mit Alpha, Schweife) und "über" die Sonne komponiert, nicht additiv –
-  so verschmelzen sie am Rand mit der Scheibe. Liegen hinter dem Wasser und werden mit gebrochen.
-- Partikel zu mir: zustandslose 3D-Punkte (additiv) starten auf der Sonnenscheibe und fliegen aufgefächert auf den Startpunkt zu, Tempo ~ Lautstärke, Ausblenden 0,8–2,2 m vor der Kamera. Anzahl und Größe im UI.
-- UI-Panel (⚙︎ ein/aus): Effekte, Effekt-/Stimm-Lautstärke, Partikel zu mir (Anzahl, Größe), Wasser-Auflösung, Wellen-Frequenz – alles in localStorage.
-- Stimmeffekte (Gate öffnet nur beim Summen; Kompressor am Ausgang; Regler „Eigene Stimme“ mischt die trockene Stimme dazu, Standard 0):
-  Hall (Faltungshall, ~7 s), Echo (Ping-Pong), Grain Delay, Shimmer (Körner eine Oktave höher in den Hall), Obertöne (Sinus-Unteroktave/Quinte/Oktave folgen der Tonhöhe).
-  Schalter + Effekt-Lautstärke in der Browser-UI, Einstellungen in localStorage gespeichert.
-- Feedback-Risiko: Quest-Lautsprecher + Mikro ohne Echounterdrückung. Bei Pfeifen Effekt-Lautstärke senken oder Kopfhörer nutzen.
+- Davor eine transparente, brechende Wasserebene (Quad 16 × 16 m, 5 m vor dem Nutzer, Behälter-Umkreisradius 3 m, Sonnenradius 1,4 m). Die Sonne liegt 1 m dahinter und wird per Brechung im Shader verzerrt (inkl. Parallaxe).
+- Sonne wächst beim Summen um bis zu 12 % (gedämpfte Feder); Rand wabert organisch (`sunRadius()` in `SUN_GLSL`).
+- Wellen: 2D-Wellengleichung auf der GPU (RG16F Ping-Pong), Auflösung 512–1536, Schritte/s = 480 × Auflösung/512.
+  Anregung: `waveGain * amp^waveDyn` (Dynamik-Kurve: leises Summen = schwache Wellen). Tonhöhe → Wellenlänge, „Wellen-Frequenz“ verkürzt sie.
+  Behälterformen (`uShape`): Kreis, 3/4/5/6/8-Eck, Blüte 5/6/8. Optional folgt der Anregungsort verzögert dem Blick (Kopf-Vorwärtsrichtung ∩ Wasserebene; in der 2D-Vorschau dem Zeiger).
+- Corona: zustandslose GPU-Partikel, Emission entlang des Randes über wanderndes Noise (Noise-Größe einstellbar, ganzzahlige Frequenzen → nahtlos).
+  Geburtsfarbe = Sonnenfarbe am Ort, glühen ins Rot aus. Drei Tiefenebenen (vor / auf / hinter der Sonne, je eigene RGBA16F-Textur mit Schweifen durch Teil-Löschen pro Frame),
+  vormultipliziert „über“ die Szene komponiert, hintere Ebene von der Scheibe verdeckt; alle werden mit dem Wasser gebrochen → Parallaxe.
+- Partikel zu mir: 3D-Punkte von der Sonnenscheibe auf den Betrachter zu, Tempo ~ Lautstärke, Ausblenden 0,8–2,2 m vor der Kamera.
+  Schweife als Geometrie (6 Segmente entlang der Flugbahn, spitz zulaufend, seitlich schlängelnd wie Spermien).
+- Stimmeffekte: Hall, Echo, Grain Delay, Shimmer, Obertöne (Schalter); Effekt-Lautstärke, trockene Stimme, Gate-Schwelle.
+  Gate folgt der rohen Lautstärke (RMS-Schwelle, schnell auf / langsam zu). Kompressor am Ausgang.
+- Feedback-Risiko: Quest-Lautsprecher + Mikro ohne Echounterdrückung. Bei Pfeifen Lautstärke senken oder Kopfhörer nutzen.
+- UI: ⚙︎ blendet das Panel ein/aus; Untermenüs (`<details>`) „Stimme & Effekte“, „Sonne & Corona“, „Partikel zu mir“, „Wasser & Cymatics“.
+  Definiert in `SECTIONS` in `main.js`, alles in localStorage.
 - Zum Testen ohne Mikro: Controller-Trigger halten (VR) bzw. Bildschirm gedrückt halten (2D-Vorschau).
 
 ## Entscheidungen
