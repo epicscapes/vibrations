@@ -2,8 +2,9 @@
 // Vanilla WebGL2 + WebXR. Teilt Stimmerkennung/-effekte (audio.js) und VR-Menü (vrmenu.js) mit Soothing Ripples.
 import {
   skyVS, skyFS, terrainVS, terrainFS, ballVS, ballFS, sparkVS, sparkFS,
-  ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS, wingVS, wingFS, WING_FEATHERS, MAX_LIGHTS, compFS,
+  ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS, wingVS, wingFS, WING_FEATHERS, MAX_LIGHTS, compFS, shaftVS, shaftFS,
 } from './flowshaders.js';
+import { Bloom } from './flowpost.js';
 import { FlowAudio } from './flowsound.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 import { VRMenu } from './vrmenu.js';
@@ -56,8 +57,13 @@ const SECTIONS = [
     fdMaxSpeed: { label: 'Max speed (m/s)', min: 2, max: 20, step: 0.5, def: 9 },
     fdIOR:      { label: 'Refraction (IOR)', min: 1, max: 2.2, step: 0.01, def: 1.4 },
     fdRough:    { label: 'Roughness', min: 0, max: 1, step: 0.05, def: 0.25 },
+    fdRoughQ:   { label: 'Roughness quality', options: [[1, 'Fast (soft patterns)'], [4, 'Realistic – 4 rays'], [8, 'Realistic – 8 rays']], def: 4 },
     fdLayers:   { label: 'Inner layers', min: 0, max: 3, step: 1, def: 3 },
-    fdRipples:  { label: 'Surface ripples', min: 0, max: 2, step: 0.05, def: 1 },
+    fdLayerScale: { label: 'Inner layer scale', min: 0.3, max: 1.2, step: 0.05, def: 1 },
+    fdLayerSpin:  { label: 'Inner layer spin', min: 0, max: 2, step: 0.05, def: 1 },
+    fdRipples:  { label: 'Ripple intensity', min: 0, max: 2, step: 0.05, def: 1 },
+    fdRipFreq:  { label: 'Ripple frequency', min: 4, max: 36, step: 1, def: 14 },
+    fdRipFade:  { label: 'Ripple fade-out (s)', min: 0.1, max: 4, step: 0.1, def: 0.5 },
   }},
   { title: 'Effects', items: {
     fdTrail:     { label: 'Trail density', min: 0, max: 80, step: 2, def: 30 },
@@ -66,6 +72,14 @@ const SECTIONS = [
     fdRibbon:    { label: 'Ribbon length (s)', min: 0, max: 4, step: 0.1, def: 1.8 },
     fdLines:     { label: 'Glowing ground lines', min: 0, max: 1.5, step: 0.05, def: 0.5 },
     fdGrain:     { label: 'Ground grain', min: 0, max: 1, step: 0.05, def: 0.5 },
+    fdFresnel:   { label: 'Ground fresnel', min: 0, max: 1, step: 0.05, def: 0.4 },
+  }},
+  { title: 'Atmosphere', items: {
+    fdAurora:  { label: 'Aurora sky', toggle: true, def: true },
+    fdShafts:  { label: 'Light shafts', min: 0, max: 2, step: 0.05, def: 0.5 },
+    fdBloom:   { label: 'Bloom (post effect)', toggle: true, def: false },
+    fdBloomStr:  { label: 'Bloom strength', min: 0, max: 2, step: 0.05, def: 0.7 },
+    fdBloomSoft: { label: 'Bloom softness', min: 0, max: 1, step: 0.05, def: 0.5 },
   }},
   { title: 'Audio', items: {
     fdMusic: { label: 'Music volume', min: 0, max: 1.5, step: 0.05, def: 0.7 },
@@ -83,6 +97,7 @@ for (const sec of SECTIONS) for (const [k, d] of Object.entries(sec.items)) {
   let v = d.session ? d.def : load('set.' + k, d.def);
   if (d.options && !d.options.some(([ov]) => ov === v)) v = d.def;
   if (d.min !== undefined && !(v >= d.min && v <= d.max)) v = d.def;
+  if (d.toggle && typeof v !== 'boolean') v = d.def;
   S[k] = v;
 }
 
@@ -129,6 +144,7 @@ const P = {
   sky: program(skyVS, skyFS), terrain: program(terrainVS, terrainFS), ball: program(ballVS, ballFS),
   spark: program(sparkVS, sparkFS), ring: program(ringVS, ringFS), ribbon: program(ribbonVS, ribbonFS),
   glow: program(glowVS, glowFS), wing: program(wingVS, wingFS), comp: program(ballVS, compFS),
+  shaft: program(shaftVS, shaftFS),
 };
 const emptyVao = gl.createVertexArray();
 
@@ -187,6 +203,9 @@ let jumpPressed = false, jumpPrev = false;
 let yaw = 0;                      // Drehung der Ansicht um die Kugel
 let rigPos = null;                // Weltposition des XR-Ursprungs (folgt der Kugel weich)
 let time = 0, hue = 0, propel = 0, driveVis = 0;
+let ripEnv = 0;                   // Ripple-Hüllkurve (schnell an, klingt mit fdRipFade aus)
+const shellRot = [0, 1, 2].map(() => new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]));
+const shellRadius = (k) => Math.min((0.8 - k * 0.22) * S.fdLayerScale, 0.95);
 let moveDir = [0, -1];            // aktuelle Fahrtrichtung (xz)
 let headFwd = [0, -1];            // Blickrichtung (xz, Welt)
 let manualHum = false;
@@ -304,10 +323,17 @@ function update(dt) {
   if (dist > 1e-5) {
     const axis = v3.norm(v3.cross([0, 1, 0], step));
     ball.rot = mul3(axisAngle3(axis, dist / R), ball.rot);
-    if ((time * 60 | 0) % 60 === 0) ball.rot = orthonormalize3(ball.rot);
+    // innere Schalen: gleiche Achse, Tempo umgekehrt proportional zur Größe (kleinere drehen schneller)
+    for (let k = 0; k < 3; k++) {
+      const f = 1 + (1 / shellRadius(k) - 1) * S.fdLayerSpin;
+      shellRot[k] = mul3(axisAngle3(axis, dist / R * f), shellRot[k]);
+    }
+    if ((time * 60 | 0) % 60 === 0) { ball.rot = orthonormalize3(ball.rot); for (let k = 0; k < 3; k++) shellRot[k] = orthonormalize3(shellRot[k]); }
   }
 
   driveVis += (propel - driveVis) * Math.min(dt * 4, 1);
+  const ripGoal = Math.min(propel * 1.4, 1);
+  ripEnv = ripGoal > ripEnv ? ripEnv + (ripGoal - ripEnv) * Math.min(dt * 6, 1) : ripGoal + (ripEnv - ripGoal) * Math.exp(-dt * 3 / S.fdRipFade);
   emitTrail(dist * grounded);
   updateRings(dt);
   updateHistory();
@@ -561,7 +587,6 @@ function uploadGlows() {
     const pulse = 0.8 + 0.3 * Math.sin(time * 2.2 + g.phase);
     d.set([g.x, y, g.z, g.companion ? 0.9 : 0.7, hue + g.hue, pulse * 0.7, 0.35], k * 7); k++;
   }
-  for (const c of companions) { d.set([c.pos[0], c.pos[1], c.pos[2], 0.7, hue + 0.25, 0.45, 0.4], k * 7); k++; }
   gl.bindBuffer(gl.ARRAY_BUFFER, glowBuf.buf);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, d, 0, k * 7);
   return k;
@@ -605,6 +630,10 @@ function softUniforms(u) {
   gl.uniform1f(u.uBallR, R);
 }
 
+const SHAFT_CELL = 11, SHAFT_GRID = 9;   // Raster der Lichtstrahlen: 9×9 Zellen à 11 m um den Spieler
+const shellRotBuf = new Float32Array(27);
+function shellRotData() { for (let k = 0; k < 3; k++) shellRotBuf.set(shellRot[k], k * 9); return shellRotBuf; }
+
 function drawWorld(proj, view, cam, vpW, vpH) {
   const pxScale = proj[5] * vpH * 0.5;
 
@@ -616,6 +645,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform3fv(P.sky.u.uCam, cam);
   gl.uniform1f(P.sky.u.uHue, hue);
   gl.uniform1f(P.sky.u.uTime, time);
+  gl.uniform1f(P.sky.u.uAurora, S.fdAurora ? 1 : 0);
   gl.bindVertexArray(fullscreen);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -635,6 +665,8 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uFogDensity, 0.05);
   gl.uniform1f(u.uGrain, S.fdGrain);
   gl.uniform1f(u.uLines, S.fdLines);
+  gl.uniform1f(u.uFresnel, S.fdFresnel);
+  gl.uniform1f(u.uAurora, S.fdAurora ? 1 : 0);
   lightUniforms(u);
   gl.bindVertexArray(terrainMesh.vao);
   gl.drawElements(gl.TRIANGLES, terrainMesh.count, gl.UNSIGNED_INT, 0);
@@ -661,15 +693,38 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uLight, 0.45 + 0.55 * driveVis);
   gl.uniform1f(u.uIOR, S.fdIOR);
   gl.uniform1f(u.uRough, S.fdRough);
+  gl.uniform1i(u.uSamples, S.fdRough > 0 ? S.fdRoughQ : 1);
   gl.uniform1i(u.uLayers, S.fdLayers);
+  gl.uniform1f(u.uShellScale, S.fdLayerScale);
+  gl.uniformMatrix3fv(u['uShellRot[0]'], false, shellRotData());
+  gl.uniform1f(u.uAurora, S.fdAurora ? 1 : 0);
   gl.uniform3f(u.uEmit, -moveDir[0], 0, -moveDir[1]);
-  gl.uniform1f(u.uRipple, S.fdRipples * Math.min(driveVis * 1.4, 1));
+  gl.uniform1f(u.uRipple, S.fdRipples * ripEnv);
+  gl.uniform1f(u.uRipFreq, S.fdRipFreq);
   drawSphere(u, ball.pos, R, ball.rot);
 
   // Leuchtendes: additiv, verdeckt vom Gelände, schreibt keine Tiefe, blendet an Geometrie weich aus
   gl.enable(gl.BLEND);
   gl.depthMask(false);
   gl.blendFunc(gl.ONE, gl.ONE);
+
+  // Atmosphärische Lichtstrahlen: zur Kamera gedrehte, schräge Bänder, unten zum Boden und zur Kamera hin ausgeblendet
+  if (S.fdShafts > 0) {
+    u = P.shaft.u;
+    gl.useProgram(P.shaft.p);
+    gl.uniformMatrix4fv(u.uProj, false, proj);
+    gl.uniformMatrix4fv(u.uView, false, view);
+    gl.uniform3fv(u.uCam, cam);
+    gl.uniform2f(u.uCenter, Math.round(ball.pos[0] / SHAFT_CELL) * SHAFT_CELL, Math.round(ball.pos[2] / SHAFT_CELL) * SHAFT_CELL);
+    gl.uniform1f(u.uCell, SHAFT_CELL);
+    gl.uniform1i(u.uGrid, SHAFT_GRID);
+    gl.uniform1f(u.uRadius, SHAFT_CELL * SHAFT_GRID * 0.5);
+    gl.uniform1f(u.uTime, time);
+    gl.uniform1f(u.uHue, hue);
+    gl.uniform1f(u.uIntensity, S.fdShafts);
+    gl.bindVertexArray(emptyVao);
+    gl.drawArrays(gl.TRIANGLES, 0, SHAFT_GRID * SHAFT_GRID * 6);
+  }
 
   // Pfad + Explosionen
   u = P.spark.u;
@@ -691,7 +746,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     gl.drawArrays(gl.POINTS, 0, burstList.length);
   }
 
-  // Goals + Halos der Begleiter
+  // Goals
   if (glowCount) {
     u = P.glow.u;
     gl.useProgram(P.glow.p);
@@ -794,11 +849,12 @@ function previewFrame(t) {
   prepareFrame(cam);
   if (sound) sound.listener(cam, transformDir(camM, [0, 0, -1]), transformDir(camM, [0, 1, 0]));
 
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  if (S.fdBloom) bloom.begin(w, h); else gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, w, h);
   gl.clearColor(0, 0, 0, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   drawWorld(perspective(parseFloat(params.get('fov') || '1.1'), w / h, 0.05, 200), view, cam, w, h);
+  if (S.fdBloom) bloom.finish(null, [[0, 0, w, h]], S.fdBloomStr, S.fdBloomSoft);
   requestAnimationFrame(previewFrame);
 }
 ui.preview.addEventListener('click', () => setPreview(!previewOn));
@@ -914,6 +970,8 @@ ui.toggle.addEventListener('click', () => ui.panel.classList.toggle('hidden'));
 // Für automatische Tests: ?debug=1 macht den Zustand von außen erreichbar
 if (params.get('debug')) window.__fd = { ball, goals, companions, get sound() { return sound; } };
 
+const bloom = new Bloom(gl, program, fullscreen);
+
 const vrMenu = new VRMenu(gl, {
   program, sections: SECTIONS, S,
   effects: Object.entries(EFFECTS).map(([key, e]) => ({ key, label: e.label })),
@@ -1021,18 +1079,25 @@ function xrFrame(t, frame) {
   if (sound) sound.listener(headPos, transformDir(rig, fl), transformDir(rig, upOf(ho)));
 
   const layer = session.renderState.baseLayer;
-  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  const useBloom = S.fdBloom;
+  if (useBloom) bloom.begin(layer.framebufferWidth, layer.framebufferHeight);
+  else gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
   gl.clearColor(0, 0, 0, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  const vps = [];
   for (const view of pose.views) {
     const vp = layer.getViewport(view);
+    vps.push([vp.x, vp.y, vp.width, vp.height]);
     gl.viewport(vp.x, vp.y, vp.width, vp.height);
-    const localView = view.transform.inverse.matrix;
-    const worldView = mul(localView, invRig);
-    drawWorld(view.projectionMatrix, worldView, camW(view.transform.position), vp.width, vp.height);
-    gl.disable(gl.DEPTH_TEST);
-    vrMenu.draw(view.projectionMatrix, localView, vp.width, vp.height);
+    drawWorld(view.projectionMatrix, mul(view.transform.inverse.matrix, invRig), camW(view.transform.position), vp.width, vp.height);
   }
+  // Bloom auf die Szene, danach das Menü (bleibt scharf)
+  if (useBloom) bloom.finish(layer.framebuffer, vps, S.fdBloomStr, S.fdBloomSoft);
+  pose.views.forEach((view, i) => {
+    gl.viewport(...vps[i]);
+    gl.disable(gl.DEPTH_TEST);
+    vrMenu.draw(view.projectionMatrix, view.transform.inverse.matrix, vps[i][2], vps[i][3]);
+  });
 }
 
 initXR();

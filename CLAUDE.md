@@ -31,7 +31,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Ruhig, langsam, dunkel mit weichem Licht. Keine schnellen Bewegungen, nichts, was Übelkeit auslöst.
 - Soothing Ripples: Nutzer steht/sitzt still, keine künstliche Fortbewegung.
 - Flow Drift: künstliche Fortbewegung (Kamera folgt der Kugel) auf ausdrücklichen Wunsch; Drehung fließend ohne Vignette (Nutzerwahl).
-- Performance: Quest 3 soll stabil 72–90 fps halten. Wenige Lichter, sparsame Partikel, keine Post-Processing-Ketten.
+- Performance: Quest 3 soll stabil 72–90 fps halten. Wenige Lichter, sparsame Partikel. Post-Processing nur optional (Flow-Drift-Bloom, standardmäßig aus).
 
 ## Soothing Ripples (Stand v0.14.0)
 - Look nach Referenz: Sonnenscheibe wie eine Projektion – in Ruhe tiefrot und gedämpft (untergehende afrikanische Sonne), beim Summen hell orange (`uSunHeat` folgt dem federnden Wachstum), schmaler chromatischer Rand (gelb → orange → rot), gesättigter roter Glow, dunkelroter Grund (Korn wurde entfernt).
@@ -75,20 +75,32 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.16.0)
+## Flow Drift (Stand v0.17.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
   Himmel: Aurora-Schleier rundherum (schräge, langsam wandernde Bänder), keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
+  Aurora abschaltbar (`fdAurora` → `uAurora` in Himmel, Boden-Spiegelung und Murmel; aus = nur Nebelverlauf).
+  Lichtstrahlen (`fdShafts`, Untermenü „Atmosphere“): wie gestreute Planes in Unreal – zustandsloses Raster 9×9 Zellen à 11 m um den Spieler (Hash entscheidet,
+  ob eine Zelle einen Strahl hat), schräge Bänder (eine Lichtrichtung), zylindrisch zur Kamera gedreht, additiv, langsam pulsierend + wanderndes Streifen-Noise;
+  blenden unten per Nähe-Maske zum Gelände (0–3 m über `terrainH`), zur Kamera (3–11 m) und zum Rasterrand aus (`shaftVS/FS`).
+  Bloom (`fdBloom`, Stärke, Weichheit; `flowpost.js`): Szene in eigenen Puffer (RGBA8 + Tiefe), Hellpass mit weichem Knick auf ¼ Auflösung (RGBA16F),
+  trennbare Gauß-Weichzeichnung (Weichheit > 0,5 = zwei Durchgänge), pro Auge begrenzt; danach Komposition in den XR-Puffer, dann das VR-Menü (bleibt scharf).
+  Kostet auf der Quest einen zusätzlichen Vollbild-Durchgang → standardmäßig aus.
+  Dithering (`DITHER_GLSL`, ±½ Farbstufe) in Himmel, Boden, Murmel, Ribbon, Ringen, Flügeln, Lichtstrahlen und Bloom gegen Treppenstufen in weichen Verläufen.
   Boden: fast schwarz, weiche Marmorierung, feine Körnung als Bump (`fdGrain`, blendet mit Entfernung aus), Fake-Spiegelung des Himmels (Fresnel),
-  leuchtende Höhenlinien, die langsam nach oben wandern, maskiert mit großem weichem wanderndem Noise (`fdLines`),
+  leuchtende Höhenlinien, die langsam nach oben wandern, maskiert mit großem weichem wanderndem Noise (`fdLines`); Abstand unregelmäßig (Höhe per Noise verzogen),
+  Helligkeit und Breite je Linie per Hash, weiche Kanten. Dezenter Boden-Fresnel in Szenenfarbe (`fdFresnel`, 0 = aus),
   Höhennebel (am Boden am dichtesten, Szenenfarbe), Geländerand komplett im Nebel.
   Grundfarben `GLOW`/`AUR_*`/`FOG` in `BASE_GLSL` (JS-Kopie `GLOW` in flowdrift.js) – alles per Hue-Shift nach Stimmfrequenz.
 - Level 1 „Rolling Hills“: unendliches Sinus-Hügel-Gelände (`terrainH` identisch in `flowshaders.js` TERRAIN_GLSL und `flowdrift.js` – beide gleich halten),
   Gitter 180² über 110 m, mitwandernd und auf Zellen gerastet. Weitere Levels: Option `fdLevel` – brauchen eigene Höhenfunktion in JS und GLSL.
 - Hauptkugel (r = 0,3 m) = Glasmurmel, im Fragment-Shader verfolgt (deckend, nur Vorderseiten → kein sichtbares Inneres mehr):
-  Fresnel-Spiegelung, Brechung (`fdIOR`), Ripples auf der Oberfläche ab der Rückseite (Warp-Austritt, laufen nach vorn, klingen schnell ab, `fdRipples` × Antrieb),
-  0–3 eingeschlossene Schalen (`fdLayers`) mit gravurartigen Julia-Wirbellinien und versetzter Evolution (drehen mit der Kugel), Innenlicht,
-  Austritt + Hintergrund-Näherung; Roughness (`fdRough`) macht Inneres/Hintergrund weicher und Glanz breiter.
-- Begleiter (r = 0,12 m): leuchtende Kugeln (innen hell Lavendel, zum Rand Glow-Farbton), keine Fraktale.
+  Fresnel-Spiegelung, Brechung (`fdIOR`), Ripples auf der Oberfläche ab der Rückseite (Warp-Austritt, laufen nach vorn):
+  Intensität `fdRipples`, Frequenz `fdRipFreq` (Neigung so normiert, dass die Stärke gleich bleibt), Ausklingzeit `fdRipFade` (Hüllkurve `ripEnv`: schnell an, exponentiell aus).
+  0–3 eingeschlossene Schalen (`fdLayers`) mit gravurartigen Julia-Wirbellinien; Größe `fdLayerScale` (Radius (0,8 − 0,22·k)·Skala, max. 0,95).
+  Jede Schale hat eine eigene Drehung (`uShellRot[3]`, CPU): gleiche Achse wie die Kugel, Tempo 1 + (1/Radius − 1)·`fdLayerSpin` → kleinere drehen schneller.
+  Innenlicht, Austritt + Hintergrund-Näherung. Roughness (`fdRough`) mit Qualität `fdRoughQ`: Fast = weichere Muster (alte Näherung),
+  4/8 rays = echte gestreute Strahlen (Mikrofacetten-Normalen pro Pixel gestreut, Brechung + Spiegelung gemittelt; teurer, aber realistisches Milchglas).
+- Begleiter (r = 0,12 m): leuchtende Kugeln (innen hell Lavendel, zum Rand Glow-Farbton), keine Fraktale, kein Halo-Sprite mehr (auf Wunsch entfernt).
   Innenlichter (max. 9 Punktlichter `MAX_LIGHTS`) beleuchten den Boden: diffuses Kontaktlicht + glänzender Lichtstreif (Fake-Spiegelung statt echter Reflexion).
 - Physik: Hangabtrieb nur am Boden (5/7 g × 0,6), Antrieb = Summen (alternativ Trigger / W / gedrückt halten) × Thrust, Reibung, Höchsttempo; Rollen über 3×3-Rotation.
   Sprung: A/B rechts oder Y links (X = Menü), Vorschau: Leertaste. Landung mit kleinem Rückprall + Aufprallklang.

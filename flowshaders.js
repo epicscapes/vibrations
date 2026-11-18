@@ -39,6 +39,11 @@ float vnoise(vec2 p) {
   return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x), mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), u.x), u.y);
 }`;
 
+// Dithering gegen Treppenstufen in weichen Verläufen (8-Bit-Bildpuffer): ±½ Farbstufe Rauschen pro Pixel
+const DITHER_GLSL = `
+float ditherHash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+vec3 dither(vec3 c) { return c + (ditherHash(gl_FragCoord.xy) - 0.5) / 255.0; }`;
+
 // Grundfarben (werden per Hue-Shift nach Stimmfrequenz gedreht)
 const BASE_GLSL = `
 const vec3 GLOW     = vec3(0.95, 0.28, 0.75);  // Licht der Kugeln, Funken, Ringe (Magenta)
@@ -50,6 +55,7 @@ const vec3 FOG      = vec3(0.065, 0.016, 0.07);// Szenen-/Bodennebel
 // Aurora + Nebel: von Himmel, Boden (Fake-Spiegelung) und Kugeln gemeinsam genutzt
 const SKY_GLSL = `
 uniform float uTime;
+uniform float uAurora;      // 0 = Aurora aus (nur Nebelverlauf), 1 = an
 vec3 skyColor(vec3 dir, float hue) {
   float up = dir.y;
   float az = atan(dir.x, dir.z);
@@ -60,7 +66,7 @@ vec3 skyColor(vec3 dir, float hue) {
   curtain = pow(max(curtain, 0.0), 1.4);
   float band = smoothstep(-0.02, 0.25, up) * (1.0 - smoothstep(0.55, 1.0, up) * 0.6);
   vec3 aur = mix(hueShift(AUR_LOW, hue), hueShift(AUR_HIGH, hue), smoothstep(0.1, 0.8, up));
-  vec3 col = hueShift(FOG, hue) + aur * curtain * band * 0.95;
+  vec3 col = hueShift(FOG, hue) * (1.0 + 0.4 * smoothstep(0.0, 0.5, up) * (1.0 - uAurora)) + aur * curtain * band * 0.95 * uAurora;
   // zum Horizont in den Nebel übergehen -> kein sichtbarer Horizont
   return mix(hueShift(FOG, hue), col, smoothstep(0.0, 0.18, up));
 }`;
@@ -81,10 +87,11 @@ out vec4 o;
 ${COLOR_GLSL}
 ${BASE_GLSL}
 ${SKY_GLSL}
+${DITHER_GLSL}
 void main() {
   vec4 w = uInvVP * vec4(vNdc, 1.0, 1.0);
   vec3 dir = normalize(w.xyz / w.w - uCam);
-  o = vec4(skyColor(dir, uHue), 1.0);
+  o = vec4(dither(skyColor(dir, uHue)), 1.0);
 }`;
 
 // ---------- Gelände: dunkel, leicht glänzend, Innenlichter der Kugeln, Höhennebel ----------
@@ -114,6 +121,7 @@ uniform vec3 uLightCol[${MAX_LIGHTS}];   // Farbe × Stärke
 uniform float uFogDensity;
 uniform float uGrain;       // Körnung als Bump (zeigt Bewegung besser)
 uniform float uLines;       // leuchtende Höhenlinien
+uniform float uFresnel;     // dezenter Fresnel-Saum in Szenenfarbe (0 = aus)
 in vec3 vWorld;
 out vec4 o;
 ${COLOR_GLSL}
@@ -121,6 +129,7 @@ ${BASE_GLSL}
 ${TERRAIN_GLSL}
 ${SKY_GLSL}
 ${NOISE_GLSL}
+${DITHER_GLSL}
 
 // weiche Marmorierung (wie die Bodentextur der Referenz)
 float marble(vec2 p) {
@@ -159,15 +168,23 @@ void main() {
     col += uLightCol[i] * (diff * 0.9 + spec * 0.55 * (0.5 + m));
   }
 
-  // leuchtende Höhenlinien, die langsam nach oben wandern; maskiert mit großem, weichem, wanderndem Noise
+  // dezenter Fresnel-Saum in Szenenfarbe (Hügelkanten lesbarer)
+  col += mix(hueShift(AUR_LOW, uHue), hueShift(AUR_HIGH, uHue), 0.5) * fres * 0.14 * uFresnel;
+
+  // leuchtende Höhenlinien, die langsam nach oben wandern: unregelmäßige Abstände (Höhe per Noise verzogen),
+  // jede Linie mit eigener Helligkeit, weich; maskiert mit großem, weichem, wanderndem Noise
   if (uLines > 0.0) {
-    float hl = vWorld.y * 14.0 - uTime * 0.5;
-    float w = fwidth(hl);
-    float line = 1.0 - smoothstep(0.0, w * 1.5 + 0.02, abs(fract(hl) - 0.5));
     vec2 mp = vWorld.xz;
+    float warp = vnoise(mp * 0.07 + 3.1) * 1.6 + vnoise(mp * 0.19 - 1.7) * 0.6;
+    float hl = (vWorld.y + warp) * 9.0 - uTime * 0.5;
+    float w = fwidth(hl);
+    float id = floor(hl + 0.5);
+    float bright = 0.25 + 0.75 * hash12(vec2(id * 0.137, 4.7));          // Helligkeit je Linie
+    float width = 0.08 + 0.12 * hash12(vec2(id * 0.311, 9.1));           // Breite je Linie
+    float line = (1.0 - smoothstep(0.0, w * 2.0 + width, abs(fract(hl) - 0.5) - 0.0)) * bright;
     float mask = vnoise(mp * 0.08 + vec2(uTime * 0.015, -uTime * 0.01)) * 0.65 + vnoise(mp * 0.21 - uTime * 0.025) * 0.35;
     mask = smoothstep(0.45, 0.85, mask);
-    col += hueShift(GLOW, uHue) * line * mask * uLines * 0.16 * (1.0 - smoothstep(10.0, 30.0, dist));
+    col += hueShift(GLOW, uHue) * line * mask * uLines * 0.12 * (1.0 - smoothstep(10.0, 30.0, dist));
   }
 
   // Höhennebel: am Boden am dichtesten, in der Szenenfarbe
@@ -176,7 +193,7 @@ void main() {
   col = mix(col, hueShift(FOG, uHue), clamp(fog, 0.0, 1.0));
   // ganz außen vollständig im Nebel (kein Rand des Geländes sichtbar)
   col = mix(col, hueShift(FOG, uHue), smoothstep(36.0, 52.0, dist));
-  o = vec4(col, 1.0);
+  o = vec4(dither(col), 1.0);
 }`;
 
 // ---------- Kugeln: gläsern, dunkle Wirbel (Julia), Innenlicht, dezenter Rand ----------
@@ -208,14 +225,17 @@ precision highp float;
 uniform vec3 uCam;
 uniform vec3 uPos;
 uniform float uR;
-uniform mat3 uRot;
 uniform float uHue;
 uniform float uLight;      // Innenlicht
 uniform float uIOR;        // Brechungsindex
 uniform float uRough;      // 0 = klar, 1 = milchig
+uniform int uSamples;      // 1 = schnelle Näherung, 4/8 = gestreute Strahlen (realistischere Roughness)
 uniform int uLayers;       // eingeschlossene Schalen 0..3
+uniform float uShellScale; // Größe der Schalen
+uniform mat3 uShellRot[3]; // eigene Drehung je Schale (kleinere drehen schneller)
 uniform vec3 uEmit;        // Richtung der Ripple-Quelle (hinten, Welt)
-uniform float uRipple;     // Ripple-Stärke
+uniform float uRipple;     // Ripple-Stärke (bereits mit Ausklingzeit geglättet)
+uniform float uRipFreq;    // Ripple-Frequenz
 in vec3 vObj;
 in vec3 vN;
 in vec3 vWorld;
@@ -223,6 +243,7 @@ out vec4 o;
 ${COLOR_GLSL}
 ${BASE_GLSL}
 ${SKY_GLSL}
+${DITHER_GLSL}
 vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 float julia(vec2 z, vec2 c) {
   for (int i = 0; i < 22; i++) {
@@ -232,78 +253,95 @@ float julia(vec2 z, vec2 c) {
   }
   return 1.0;
 }
-// Muster auf einer inneren Schale (Einheitsvektor q, Objektraum)
-float shell(vec3 q, float k) {
+float shellRadius(int k) { return min((0.8 - float(k) * 0.22) * uShellScale, 0.95); }
+// gravurartige Wirbel-Linien entlang der Julia-Höhenstufen
+float shell(vec3 q, float k, float soft) {
   vec2 z = q.xz / (1.0 + abs(q.y)) * (1.5 + 0.3 * k);
   float a = 3.1 + 1.4 * sin(uTime * 0.07 + k * 2.1);
   float t = julia(z, 0.7885 * vec2(cos(a), sin(a)));
-  // gravurartige Wirbel-Linien entlang der Julia-Höhenstufen (wie die eingeschlossenen Muster der Referenz)
-  float w = 0.06 + uRough * 0.18;
+  float w = 0.06 + soft * 0.18;
   float lines = 1.0 - smoothstep(0.0, w, abs(fract(t * 3.0 + k * 0.33) - 0.5));
-  return lines * smoothstep(0.08, 0.25, t) * (1.0 - uRough * 0.4);
+  return lines * smoothstep(0.08, 0.25, t) * (1.0 - soft * 0.4);
 }
-vec3 background(vec3 d) {
+vec3 background(vec3 d, float soft) {
   vec3 g = hueShift(FOG, uHue) * 0.6 + hueShift(GLOW, uHue) * 0.1 * uLight;   // Boden mit Lichtpfütze
   vec3 b = d.y < -0.02 ? g : skyColor(d, uHue);
-  return mix(b, hueShift(FOG, uHue) * 1.4, uRough * 0.5);
+  return mix(b, hueShift(FOG, uHue) * 1.4, soft * 0.5);
 }
+// Ein Strahl durch die Murmel: Eintritt (gebrochen), Schalen, Innenlicht, Austritt -> Farbe hinter der Oberfläche
+vec3 traceInside(vec3 v, vec3 nr, float soft) {
+  vec3 rd = refract(-v, nr, 1.0 / uIOR);
+  if (dot(rd, rd) < 0.5) rd = reflect(-v, nr);
+  rd = normalize(rd);
+  vec3 ro = (vWorld - uPos) / uR;          // Einheitskugel, Weltausrichtung
+  vec3 acc = vec3(0.0);
+  float trans = 1.0;
+  for (int k = 0; k < 3; k++) {
+    if (k >= uLayers) break;
+    float rk = shellRadius(k);
+    float b = dot(ro, rd), h = b * b - (dot(ro, ro) - rk * rk);
+    if (h <= 0.0) continue;
+    float t = -b - sqrt(h);
+    if (t <= 0.0) continue;
+    vec3 q = transpose(uShellRot[k]) * normalize(ro + rd * t);   // in die Drehung dieser Schale
+    float pat = shell(q, float(k), soft);
+    acc += trans * hueShift(GLOW, uHue + float(k) * 0.3) * pat * (0.55 - float(k) * 0.12);
+    trans *= 1.0 - pat * 0.4;
+  }
+  float tc = max(-dot(ro, rd), 0.0);
+  float dmin = length(ro + rd * tc);
+  acc += trans * hueShift(GLOW, uHue) * uLight * exp(-dmin * dmin * 9.0) * 0.8 * (1.0 - soft * 0.3);
+  float b2 = dot(ro, rd);
+  float t2 = -b2 + sqrt(max(b2 * b2 - (dot(ro, ro) - 1.0), 0.0));
+  vec3 pe = ro + rd * t2;
+  vec3 od = refract(rd, -normalize(pe), uIOR);
+  if (dot(od, od) < 0.5) od = reflect(rd, -normalize(pe));
+  acc += trans * background(normalize(od), soft) * 0.35;
+  return acc;
+}
+float rnd(vec2 p, float k) { return fract(sin(dot(p + k * 17.3, vec2(12.9898, 78.233))) * 43758.5453); }
 void main() {
   vec3 n = normalize(vN);
   vec3 v = normalize(uCam - vWorld);
   if (dot(n, v) < 0.0) discard;
 
-  // Ripples: laufen von der Quelle hinten über die Oberfläche, klingen schnell ab
+  // Ripples: laufen von der Quelle hinten über die Oberfläche
   float c = clamp(dot(n, uEmit), -1.0, 1.0);
   float th = acos(c);
-  float ph = th * 14.0 - uTime * 9.0;
+  float ph = th * uRipFreq - uTime * 9.0;
   float env = exp(-th * 2.4) * uRipple;
-  float dh = (cos(ph) * 14.0 - 2.4 * sin(ph)) * env;
+  float dh = (cos(ph) * uRipFreq - 2.4 * sin(ph)) * env;
   vec3 g = c * n - uEmit;
   float gl = length(g);
-  vec3 nr = gl > 1e-4 ? normalize(n - g / gl * dh * 0.012) : n;
+  vec3 nr = gl > 1e-4 ? normalize(n - g / gl * dh * 0.012 * 14.0 / uRipFreq) : n;
 
   float f0 = pow((uIOR - 1.0) / (uIOR + 1.0), 2.0);
-  float F = f0 + (1.0 - f0) * pow(1.0 - max(dot(nr, v), 0.0), 5.0);
-  vec3 refl = skyColor(reflect(-v, nr), uHue);
-
-  // in den Objektraum (Einheitskugel), damit das Innere mitrollt
-  mat3 inv = transpose(uRot);
-  vec3 rd = refract(-v, nr, 1.0 / uIOR);
-  if (dot(rd, rd) < 0.5) rd = reflect(-v, nr);
-  vec3 ro = inv * (vWorld - uPos) / uR;
-  vec3 rdo = normalize(inv * rd);
-
-  vec3 acc = vec3(0.0);
-  float trans = 1.0;
-  for (int k = 0; k < 3; k++) {
-    if (k >= uLayers) break;
-    float rk = 0.8 - float(k) * 0.22;
-    float b = dot(ro, rdo), h = b * b - (dot(ro, ro) - rk * rk);
-    if (h <= 0.0) continue;
-    float t = -b - sqrt(h);
-    if (t <= 0.0) continue;
-    vec3 q = normalize(ro + rdo * t);
-    float pat = shell(q, float(k));
-    acc += trans * hueShift(GLOW, uHue + float(k) * 0.3) * pat * (0.55 - float(k) * 0.12);
-    trans *= 1.0 - pat * 0.4;
+  vec3 inside, refl;
+  if (uSamples <= 1) {
+    // schnelle Näherung: weichere Muster statt gestreuter Strahlen
+    inside = traceInside(v, nr, uRough);
+    refl = skyColor(reflect(-v, nr), uHue);
+  } else {
+    // realistischere Roughness: mehrere leicht gestreute Oberflächen-Normalen (Mikrofacetten) mitteln
+    vec3 t1 = normalize(cross(nr, abs(nr.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 t2 = cross(nr, t1);
+    inside = vec3(0.0); refl = vec3(0.0);
+    for (int s = 0; s < 8; s++) {
+      if (s >= uSamples) break;
+      float a = rnd(gl_FragCoord.xy, float(s)) * 6.2831853;
+      float r = sqrt((float(s) + 0.5) / float(uSamples)) * uRough * 0.25;
+      vec3 ns = normalize(nr + (t1 * cos(a) + t2 * sin(a)) * r);
+      inside += traceInside(v, ns, 0.0);
+      refl += skyColor(reflect(-v, ns), uHue);
+    }
+    inside /= float(uSamples);
+    refl /= float(uSamples);
   }
-  // Innenlicht: am hellsten, wo der Strahl der Mitte am nächsten kommt
-  float tc = max(-dot(ro, rdo), 0.0);
-  float dmin = length(ro + rdo * tc);
-  acc += trans * hueShift(GLOW, uHue) * uLight * exp(-dmin * dmin * 9.0) * 0.8 * (1.0 - uRough * 0.3);
-
-  // Austritt auf der Rückseite, nochmals gebrochen -> Hintergrund (genähert)
-  float b2 = dot(ro, rdo);
-  float t2 = -b2 + sqrt(max(b2 * b2 - (dot(ro, ro) - 1.0), 0.0));
-  vec3 pe = ro + rdo * t2;
-  vec3 od = refract(rdo, -normalize(pe), uIOR);
-  if (dot(od, od) < 0.5) od = reflect(rdo, -normalize(pe));
-  acc += trans * background(normalize(uRot * od)) * 0.35;
-
-  vec3 col = mix(acc, refl * 0.7, clamp(F, 0.0, 1.0));
+  float F = f0 + (1.0 - f0) * pow(1.0 - max(dot(nr, v), 0.0), 5.0);
+  vec3 col = mix(inside, refl * 0.7, clamp(F, 0.0, 1.0));
   vec3 l = normalize(vec3(-0.3, 0.9, 0.2));
   col += vec3(1.0, 0.85, 0.95) * pow(max(dot(reflect(-v, nr), l), 0.0), mix(80.0, 12.0, uRough)) * 0.3 * (1.0 - uRough * 0.6);
-  o = vec4(col, 1.0);
+  o = vec4(dither(col), 1.0);
 }`;
 
 // Begleitkugeln: leuchtende Kugel (Lavendel), innen am hellsten, zum Rand sanft in den Glow-Farbton
@@ -391,10 +429,11 @@ in vec3 vWorld;
 out vec4 o;
 ${TERRAIN_GLSL}
 ${SOFT_GLSL}
+${DITHER_GLSL}
 void main() {
   float d = length(vUv);
   float a = exp(-pow((d - 0.92) / 0.018, 2.0)) + 0.25 * exp(-pow((d - 0.9) / 0.07, 2.0));
-  o = vec4(uColor * a * uAlpha * softFade(vWorld, 0.2), 1.0);
+  o = vec4(max(dither(uColor * a * uAlpha * softFade(vWorld, 0.2)), 0.0), 1.0);
 }`;
 
 // ---------- Ribbon-Schweif ----------
@@ -415,7 +454,11 @@ in vec3 vWorld;
 out vec4 o;
 ${TERRAIN_GLSL}
 ${SOFT_GLSL}
-void main() { o = vec4(uColor * vData.x * (1.0 - vData.y * vData.y) * softFade(vWorld, 0.3), 1.0); }`;
+${DITHER_GLSL}
+void main() {
+  float side = 1.0 - vData.y * vData.y;
+  o = vec4(max(dither(uColor * vData.x * side * side * softFade(vWorld, 0.3)), 0.0), 1.0);
+}`;
 
 // ---------- Leucht-Sprites: Goals und Halos der Kugeln ----------
 export const glowVS = `#version 300 es
@@ -510,8 +553,142 @@ in vec3 vWorld;
 out vec4 o;
 ${TERRAIN_GLSL}
 ${SOFT_GLSL}
+${DITHER_GLSL}
 void main() {
   float edge = 1.0 - vUv.y * vUv.y;
   float a = edge * (0.35 + 0.65 * vUv.x) * (1.0 - vUv.x * 0.5) * uOpen * (0.6 + 0.4 * (1.0 - vK));
-  o = vec4(uColor * a * 0.8 * softFade(vWorld, 0.12), 1.0);
+  o = vec4(max(dither(uColor * a * 0.8 * softFade(vWorld, 0.12)), 0.0), 1.0);
+}`;
+
+// ---------- Atmosphärische Lichtstrahlen (wie gestreute Planes in Unreal) ----------
+// Zustandsloses Raster um den Spieler: je Zelle entscheidet ein Hash, ob dort ein Strahl steht.
+// Jeder Strahl = schräges Band, um seine Achse zur Kamera gedreht (zylindrisches Billboard), additiv.
+export const shaftVS = `#version 300 es
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform vec3 uCam;
+uniform vec2 uCenter;     // Rasterzentrum (Welt xz, auf Zellen gerastet)
+uniform float uCell;      // Zellgröße (m)
+uniform int uGrid;        // Zellen je Seite
+uniform float uTime;
+out vec2 vUv;
+out vec3 vWorld;
+out float vSeed;
+out float vOn;
+${TERRAIN_GLSL}
+float h1(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+void main() {
+  int id = gl_VertexID;
+  int q = id / 6, c = id - q * 6;
+  int gx = q - (q / uGrid) * uGrid, gz = q / uGrid;
+  vec2 cellId = floor(uCenter / uCell) + vec2(float(gx - uGrid / 2), float(gz - uGrid / 2));
+  float s0 = h1(cellId * 1.37 + 0.5), s1 = h1(cellId * 2.11 + 7.3), s2 = h1(cellId * 0.71 + 3.9);
+  vOn = s0 < 0.5 ? 1.0 : 0.0;
+  vSeed = s1;
+  vec2 corner = vec2((c == 1 || c == 2 || c == 4) ? 1.0 : -1.0, (c == 2 || c == 4 || c == 5) ? 1.0 : 0.0);
+  vec2 bxz = (cellId + vec2(s1, s2)) * uCell;
+  vec3 base = vec3(bxz.x, terrainH(bxz) - 1.5, bxz.y);
+  vec3 axis = normalize(vec3(0.35 + (s2 - 0.5) * 0.15, 1.0, 0.15 + (s1 - 0.5) * 0.15));  // alle etwa gleich schräg (eine Lichtquelle)
+  float len = 16.0 + 14.0 * s2;
+  float wid = 1.2 + 2.8 * h1(cellId * 3.3);
+  vec3 mid = base + axis * len * 0.5;
+  vec3 side = normalize(cross(axis, uCam - mid));
+  vec3 w = base + axis * len * corner.y + side * wid * corner.x;
+  vUv = corner;
+  vWorld = w;
+  gl_Position = vOn > 0.5 ? uProj * uView * vec4(w, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
+}`;
+
+export const shaftFS = `#version 300 es
+precision highp float;
+uniform vec3 uCam;
+uniform vec2 uCenter;
+uniform float uRadius;    // Rasterradius (Ausblenden am Rand)
+uniform float uTime;
+uniform float uHue;
+uniform float uIntensity;
+in vec2 vUv;
+in vec3 vWorld;
+in float vSeed;
+in float vOn;
+out vec4 o;
+${COLOR_GLSL}
+${BASE_GLSL}
+${TERRAIN_GLSL}
+${NOISE_GLSL}
+${DITHER_GLSL}
+void main() {
+  float across = exp(-vUv.x * vUv.x * 3.5);                                // weich quer zum Strahl
+  float along = smoothstep(0.0, 0.25, vUv.y) * pow(1.0 - vUv.y, 1.6);      // oben weich auslaufend
+  float ground = smoothstep(0.0, 3.0, vWorld.y - terrainH(vWorld.xz));     // Nähe-Maske: unten zum Boden ausblenden
+  float d = length(vWorld - uCam);
+  float camFade = smoothstep(3.0, 11.0, d);                                // zur Kamera hin ausblenden
+  float edge = 1.0 - smoothstep(uRadius * 0.55, uRadius * 0.95, length(vWorld.xz - uCenter));
+  float pulse = 0.55 + 0.45 * sin(uTime * (0.08 + vSeed * 0.07) + vSeed * 40.0);
+  float streak = 0.6 + 0.4 * vnoise(vec2(vUv.x * 2.5 + vSeed * 9.0, vUv.y * 2.0 - uTime * 0.05));
+  vec3 col = hueShift(mix(AUR_LOW, AUR_HIGH, vUv.y * 0.8), uHue);
+  float a = across * along * ground * camFade * edge * pulse * streak * uIntensity * 4.0;
+  o = vec4(max(dither(col * a), 0.0), 1.0);
+}`;
+
+// ---------- Bloom (Post-Effekt auf die ganze Szene) ----------
+export const postVS = `#version 300 es
+layout(location = 0) in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+// Gemeinsam: Pixel -> UV, auf das Augen-Rechteck begrenzt (kein Überlauf ins andere Auge)
+const POST_GLSL = `
+uniform vec2 uDstSize;
+uniform vec4 uBounds;   // min.xy, max.xy (UV der Quelle)
+vec2 dstUv() { return gl_FragCoord.xy / uDstSize; }
+vec2 clampUv(vec2 uv) { return clamp(uv, uBounds.xy, uBounds.zw); }`;
+
+export const brightFS = `#version 300 es
+precision highp float;
+uniform sampler2D uTex;
+uniform vec2 uSrcTexel;
+uniform float uThreshold;
+out vec4 o;
+${POST_GLSL}
+void main() {
+  vec2 uv = dstUv();
+  vec3 c = vec3(0.0);
+  c += texture(uTex, clampUv(uv + uSrcTexel * vec2(-1.0, -1.0))).rgb;
+  c += texture(uTex, clampUv(uv + uSrcTexel * vec2( 1.0, -1.0))).rgb;
+  c += texture(uTex, clampUv(uv + uSrcTexel * vec2(-1.0,  1.0))).rgb;
+  c += texture(uTex, clampUv(uv + uSrcTexel * vec2( 1.0,  1.0))).rgb;
+  c *= 0.25;
+  float b = max(max(c.r, c.g), c.b);
+  float k = smoothstep(uThreshold * 0.5, uThreshold * 2.0 + 0.05, b);   // weicher Knick statt harter Schwelle
+  o = vec4(c * k, 1.0);
+}`;
+
+export const blurFS = `#version 300 es
+precision highp float;
+uniform sampler2D uTex;
+uniform vec2 uStep;     // Abstand der Abtastpunkte (UV)
+out vec4 o;
+${POST_GLSL}
+void main() {
+  vec2 uv = dstUv();
+  vec3 c = texture(uTex, clampUv(uv)).rgb * 0.2270270;
+  c += texture(uTex, clampUv(uv + uStep * 1.3846154)).rgb * 0.3162162;
+  c += texture(uTex, clampUv(uv - uStep * 1.3846154)).rgb * 0.3162162;
+  c += texture(uTex, clampUv(uv + uStep * 3.2307692)).rgb * 0.0702703;
+  c += texture(uTex, clampUv(uv - uStep * 3.2307692)).rgb * 0.0702703;
+  o = vec4(c, 1.0);
+}`;
+
+export const bloomCompFS = `#version 300 es
+precision highp float;
+uniform sampler2D uScene;
+uniform sampler2D uBloom;
+uniform float uStrength;
+out vec4 o;
+${POST_GLSL}
+${DITHER_GLSL}
+void main() {
+  vec3 s = texelFetch(uScene, ivec2(gl_FragCoord.xy), 0).rgb;
+  vec3 b = texture(uBloom, clampUv(dstUv())).rgb;
+  o = vec4(max(dither(s + b * uStrength), 0.0), 1.0);
 }`;
