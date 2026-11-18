@@ -13,7 +13,7 @@ Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Qu
 - Mikrofon über Web Audio API (getUserMedia), Freigabe per Button vor dem Start von VR.
 
 ## Workflow
-1. Änderung machen, **`VERSION` in `main.js` erhöhen** (wird oben links angezeigt).
+1. Änderung machen, **Version `V` in `index.html` erhöhen** (wird oben links angezeigt). Alle Module/Worklet werden mit `?v=V` geladen → kein veralteter Browser-Cache (GitHub Pages cached sonst 10 min).
 2. Commit + Push auf `main` → nach ca. 1 Minute live.
 3. Auf der Quest die Seite neu laden und an der Versionsnummer prüfen, ob das Update angekommen ist.
 

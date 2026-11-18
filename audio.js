@@ -157,7 +157,7 @@ export class VoiceFX {
 
     // Grain Delay + Shimmer über AudioWorklet
     try {
-      await ctx.audioWorklet.addModule(new URL('./grain-worklet.js', import.meta.url));
+      await ctx.audioWorklet.addModule(new URL('./grain-worklet.js?v=' + (window.VIBRATIONS_VERSION || ''), import.meta.url));
       const grain = new AudioWorkletNode(ctx, 'grain', { outputChannelCount: [2] });
       send('grain', grain);
       grain.connect(this.master);

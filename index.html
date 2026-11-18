@@ -50,6 +50,21 @@
     <button id="mic">🎤 Enable microphone</button>
     <button id="vr">Enter VR</button>
   </div>
-  <script type="module" src="./main.js"></script>
+  <!-- Version: nur hier hochzählen. Jede Version lädt ihre Dateien unter eigener Adresse (?v=…),
+       damit der Quest-Browser nach dem Neuladen nicht alte Dateien aus dem Cache nimmt. -->
+  <script>
+    const V = '0.13.1';
+    window.VIBRATIONS_VERSION = V;
+    const imports = {};
+    for (const f of ['main.js', 'shaders.js', 'audio.js', 'vrmenu.js']) imports['./' + f] = './' + f + '?v=' + V;
+    const map = document.createElement('script');
+    map.type = 'importmap';
+    map.textContent = JSON.stringify({ imports });
+    document.currentScript.after(map);
+    const mod = document.createElement('script');
+    mod.type = 'module';
+    mod.src = './main.js?v=' + V;
+    map.after(mod);
+  </script>
 </body>
 </html>

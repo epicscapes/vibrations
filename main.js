@@ -7,8 +7,8 @@ import {
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 import { VRMenu } from './vrmenu.js';
 
-// Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.13.0';
+// Version kommt aus index.html (dort bei jedem Update erhöhen).
+const VERSION = 'v' + (window.VIBRATIONS_VERSION || '?');   // wird in index.html gesetzt
 
 // ---------- Feste Szenenwerte ----------
 const params = new URLSearchParams(location.search);
