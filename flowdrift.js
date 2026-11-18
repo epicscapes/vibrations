@@ -57,7 +57,7 @@ const SECTIONS = [
     fdMaxSpeed: { label: 'Max speed (m/s)', min: 2, max: 20, step: 0.5, def: 9 },
     fdIOR:      { label: 'Refraction (IOR)', min: 1, max: 2.2, step: 0.01, def: 1.4 },
     fdRough:    { label: 'Roughness', min: 0, max: 1, step: 0.05, def: 0.25 },
-    fdRoughQ:   { label: 'Roughness quality', options: [[1, 'Fast (soft patterns)'], [4, 'Realistic – 4 rays'], [8, 'Realistic – 8 rays']], def: 4 },
+    fdBallFresnel: { label: 'Ball fresnel', min: 0, max: 1, step: 0.05, def: 0.4 },
     fdLayers:   { label: 'Inner layers', min: 0, max: 3, step: 1, def: 3 },
     fdLayerScale: { label: 'Inner layer scale', min: 0.3, max: 1.2, step: 0.05, def: 1 },
     fdLayerSpin:  { label: 'Inner layer spin', min: 0, max: 2, step: 0.05, def: 1 },
@@ -73,9 +73,11 @@ const SECTIONS = [
     fdLines:     { label: 'Glowing ground lines', min: 0, max: 1.5, step: 0.05, def: 0.5 },
     fdGrain:     { label: 'Ground grain', min: 0, max: 1, step: 0.05, def: 0.5 },
     fdFresnel:   { label: 'Ground fresnel', min: 0, max: 1, step: 0.05, def: 0.4 },
+    fdSpecRough: { label: 'Light highlight roughness', min: 0, max: 1, step: 0.05, def: 0.5 },
+    fdSparks:    { label: 'Collision sparks', min: 0, max: 2, step: 0.05, def: 1 },
   }},
   { title: 'Atmosphere', items: {
-    fdAurora:  { label: 'Aurora sky', toggle: true, def: true },
+    fdAuroraInt: { label: 'Aurora sky', min: 0, max: 2, step: 0.05, def: 1 },
     fdShafts:  { label: 'Light shafts', min: 0, max: 2, step: 0.05, def: 0.5 },
     fdBloom:   { label: 'Bloom (post effect)', toggle: true, def: false },
     fdBloomStr:  { label: 'Bloom strength', min: 0, max: 2, step: 0.05, def: 0.7 },
@@ -224,6 +226,8 @@ const trailDirty = [];
 // Explosionen der Goals
 const bursts = pointBuffer(3000);
 const burstList = [];
+const chips = pointBuffer(1500);   // Kollisions-Splitter: fliegen weg, bleiben kurz am Boden liegen
+const chipList = [];
 // Goals & Begleiter
 const glowBuf = pointBuffer(256);
 let goals = [];
@@ -339,6 +343,7 @@ function update(dt) {
   updateHistory();
   updateGoals(dt);
   updateBursts(dt);
+  updateChips(dt);
 
   if (sound) {
     sound.resume();
@@ -480,6 +485,12 @@ function updateGoals(dt) {
       const j = -(1 + 0.25) * vn;                                   // Rückprall 0,25
       if (!A.main) { A.vel[0] -= nx * j * wA; A.vel[1] -= nz * j * wA; }
       B.vel[0] += nx * j * wB; B.vel[1] += nz * j * wB;
+      if (A.main && -vn > 0.12 && time - (B.c.lastSpark || 0) > 0.15) {
+        B.c.lastSpark = time;
+        const cp = [A.pos[0] + nx * A.r, 0, A.pos[2] + nz * A.r];
+        cp[1] = terrainH(cp[0], cp[2]) + RC;
+        sparkChips(cp, [nx, nz], Math.min(-vn / 2, 1));
+      }
       if (-vn > 0.25 && sound && time - (B.c.lastClick || 0) > 0.12) {
         B.c.lastClick = time;
         sound.click([(A.pos[0] + B.pos[0]) / 2, B.pos[1], (A.pos[2] + B.pos[2]) / 2], Math.min(-vn / 3, 1));
@@ -511,6 +522,42 @@ function explode(p, h) {
     burstList.push({ p: [...p], v: d, birth: time, life: 1.2 + Math.random() * 1.2, hue: h, seed: Math.random() });
   }
   if (burstList.length > bursts.capacity) burstList.splice(0, burstList.length - bursts.capacity);
+}
+
+// Kleine helle Splitter am Kontaktpunkt: springen seitlich/aufwärts weg, landen und glimmen kurz am Boden
+function sparkChips(p, n, strength) {
+  if (S.fdSparks <= 0) return;
+  const count = Math.round((6 + 22 * strength) * S.fdSparks);
+  for (let i = 0; i < count; i++) {
+    const a = Math.atan2(n[1], n[0]) + (Math.random() - 0.5) * 2.6;          // fächerförmig um die Stoßnormale, auch nach hinten
+    const side = Math.random() < 0.5 ? 1 : -1;
+    const sp = (0.4 + Math.random() * 1.1) * (0.5 + strength);
+    const v = [Math.cos(a + (side < 0 ? Math.PI : 0)) * sp, 0.6 + Math.random() * 1.4 * (0.5 + strength), Math.sin(a + (side < 0 ? Math.PI : 0)) * sp];
+    chipList.push({ p: [...p], v, birth: time, life: 2.2 + Math.random() * 2.0, hue: hue + 0.12 * (Math.random() - 0.5), seed: Math.random(), landed: false });
+  }
+  if (chipList.length > chips.capacity) chipList.splice(0, chipList.length - chips.capacity);
+}
+
+function updateChips(dt) {
+  for (let i = chipList.length - 1; i >= 0; i--) {
+    const c = chipList[i];
+    if (time - c.birth > c.life) { chipList.splice(i, 1); continue; }
+    if (c.landed) continue;
+    c.v[1] -= 4.5 * dt;                                        // leichte Schwerkraft (schweben etwas)
+    c.v = v3.scale(c.v, Math.exp(-0.6 * dt));
+    c.p = v3.add(c.p, v3.scale(c.v, dt));
+    const g = terrainH(c.p[0], c.p[2]) + 0.012;
+    if (c.p[1] <= g) {
+      if (c.v[1] < -1.2 && !c.bounced) { c.v = [c.v[0] * 0.4, -c.v[1] * 0.25, c.v[2] * 0.4]; c.bounced = true; c.p[1] = g; }
+      else { c.p[1] = g; c.landed = true; }
+    }
+  }
+  const d = chips.data;
+  chipList.forEach((c, i) => { d.set([c.p[0], c.p[1], c.p[2], c.birth, c.life, c.hue, c.seed], i * 7); });
+  if (chipList.length) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, chips.buf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, d, 0, chipList.length * 7);
+  }
 }
 
 function updateBursts(dt) {
@@ -604,12 +651,12 @@ function lightUniforms(u) {
   const pos = new Float32Array(MAX_LIGHTS * 3), col = new Float32Array(MAX_LIGHTS * 3);
   const glow = hueRGB(GLOW, hue);
   const main = 0.35 + 0.45 * driveVis;
-  pos.set(ball.pos, 0);
+  pos.set([ball.pos[0], ball.pos[1] - R * 0.8, ball.pos[2]], 0);
   col.set(glow.map((c) => c * main), 0);
   let n = 1;
   for (const c of companions) {
     if (n >= MAX_LIGHTS) break;
-    pos.set(c.pos, n * 3);
+    pos.set([c.pos[0], c.pos[1] - RC * 0.75, c.pos[2]], n * 3);
     col.set(hueRGB(GLOW, hue + 0.25).map((x) => x * 0.22), n * 3);
     n++;
   }
@@ -630,7 +677,7 @@ function softUniforms(u) {
   gl.uniform1f(u.uBallR, R);
 }
 
-const SHAFT_CELL = 11, SHAFT_GRID = 9;   // Raster der Lichtstrahlen: 9×9 Zellen à 11 m um den Spieler
+const SHAFT_CELL = 8, SHAFT_GRID = 13;   // Raster der Lichtstrahlen: 13×13 Zellen à 8 m um den Spieler
 const shellRotBuf = new Float32Array(27);
 function shellRotData() { for (let k = 0; k < 3; k++) shellRotBuf.set(shellRot[k], k * 9); return shellRotBuf; }
 
@@ -645,7 +692,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform3fv(P.sky.u.uCam, cam);
   gl.uniform1f(P.sky.u.uHue, hue);
   gl.uniform1f(P.sky.u.uTime, time);
-  gl.uniform1f(P.sky.u.uAurora, S.fdAurora ? 1 : 0);
+  gl.uniform1f(P.sky.u.uAurora, S.fdAuroraInt);
   gl.bindVertexArray(fullscreen);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -666,7 +713,8 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uGrain, S.fdGrain);
   gl.uniform1f(u.uLines, S.fdLines);
   gl.uniform1f(u.uFresnel, S.fdFresnel);
-  gl.uniform1f(u.uAurora, S.fdAurora ? 1 : 0);
+  gl.uniform1f(u.uSpecRough, S.fdSpecRough);
+  gl.uniform1f(u.uAurora, S.fdAuroraInt);
   lightUniforms(u);
   gl.bindVertexArray(terrainMesh.vao);
   gl.drawElements(gl.TRIANGLES, terrainMesh.count, gl.UNSIGNED_INT, 0);
@@ -693,11 +741,11 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uLight, 0.45 + 0.55 * driveVis);
   gl.uniform1f(u.uIOR, S.fdIOR);
   gl.uniform1f(u.uRough, S.fdRough);
-  gl.uniform1i(u.uSamples, S.fdRough > 0 ? S.fdRoughQ : 1);
+  gl.uniform1f(u.uFresnel, S.fdBallFresnel);
   gl.uniform1i(u.uLayers, S.fdLayers);
   gl.uniform1f(u.uShellScale, S.fdLayerScale);
   gl.uniformMatrix3fv(u['uShellRot[0]'], false, shellRotData());
-  gl.uniform1f(u.uAurora, S.fdAurora ? 1 : 0);
+  gl.uniform1f(u.uAurora, S.fdAuroraInt);
   gl.uniform3f(u.uEmit, -moveDir[0], 0, -moveDir[1]);
   gl.uniform1f(u.uRipple, S.fdRipples * ripEnv);
   gl.uniform1f(u.uRipFreq, S.fdRipFreq);
@@ -718,7 +766,8 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     gl.uniform2f(u.uCenter, Math.round(ball.pos[0] / SHAFT_CELL) * SHAFT_CELL, Math.round(ball.pos[2] / SHAFT_CELL) * SHAFT_CELL);
     gl.uniform1f(u.uCell, SHAFT_CELL);
     gl.uniform1i(u.uGrid, SHAFT_GRID);
-    gl.uniform1f(u.uRadius, SHAFT_CELL * SHAFT_GRID * 0.5);
+    gl.uniform2f(u.uPlayer, ball.pos[0], ball.pos[2]);
+    gl.uniform2f(u.uFade, SHAFT_CELL * 2.6, SHAFT_CELL * (SHAFT_GRID / 2 - 1.5));   // vor dem Rasterrand vollständig aus
     gl.uniform1f(u.uTime, time);
     gl.uniform1f(u.uHue, hue);
     gl.uniform1f(u.uIntensity, S.fdShafts);
@@ -733,17 +782,27 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniformMatrix4fv(u.uView, false, view);
   gl.uniform1f(u.uTime, time);
   gl.uniform1f(u.uPxScale, pxScale);
-  gl.uniform1f(u.uSize, 0.025);
-  gl.uniform1f(u.uRise, 0.006);
-  gl.uniform1f(u.uBright, 0.55);
+  gl.uniform1f(u.uSize, 0.011);
+  gl.uniform1f(u.uRise, 0.004);
+  gl.uniform1f(u.uBright, 0.85);
+  gl.uniform1f(u.uGlitter, 1);
   gl.bindVertexArray(trail.vao);
   gl.drawArrays(gl.POINTS, 0, trail.capacity);
   if (burstList.length) {
     gl.uniform1f(u.uSize, 0.04);
     gl.uniform1f(u.uRise, 0);
     gl.uniform1f(u.uBright, 0.9);
+    gl.uniform1f(u.uGlitter, 0);
     gl.bindVertexArray(bursts.vao);
     gl.drawArrays(gl.POINTS, 0, burstList.length);
+  }
+  if (chipList.length) {
+    gl.uniform1f(u.uSize, 0.02);
+    gl.uniform1f(u.uRise, 0);
+    gl.uniform1f(u.uBright, 2.2);
+    gl.uniform1f(u.uGlitter, 0);
+    gl.bindVertexArray(chips.vao);
+    gl.drawArrays(gl.POINTS, 0, chipList.length);
   }
 
   // Goals
@@ -968,7 +1027,7 @@ SECTIONS.forEach((sec, i) => {
 ui.toggle.addEventListener('click', () => ui.panel.classList.toggle('hidden'));
 
 // Für automatische Tests: ?debug=1 macht den Zustand von außen erreichbar
-if (params.get('debug')) window.__fd = { ball, goals, companions, get sound() { return sound; } };
+if (params.get('debug')) window.__fd = { ball, goals, companions, chipList, get time() { return time; }, get sound() { return sound; } };
 
 const bloom = new Bloom(gl, program, fullscreen);
 

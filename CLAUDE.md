@@ -75,17 +75,23 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.17.0)
+## Flow Drift (Stand v0.18.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
-  Himmel: Aurora-Schleier rundherum (schräge, langsam wandernde Bänder), keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
-  Aurora abschaltbar (`fdAurora` → `uAurora` in Himmel, Boden-Spiegelung und Murmel; aus = nur Nebelverlauf).
-  Lichtstrahlen (`fdShafts`, Untermenü „Atmosphere“): wie gestreute Planes in Unreal – zustandsloses Raster 9×9 Zellen à 11 m um den Spieler (Hash entscheidet,
-  ob eine Zelle einen Strahl hat), schräge Bänder (eine Lichtrichtung), zylindrisch zur Kamera gedreht, additiv, langsam pulsierend + wanderndes Streifen-Noise;
-  blenden unten per Nähe-Maske zum Gelände (0–3 m über `terrainH`), zur Kamera (3–11 m) und zum Rasterrand aus (`shaftVS/FS`).
+  Himmel: Aurora-Schleier rundherum, keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
+  Die Schleier sind parallel zur Lichtstrahl-Richtung `SHAFT_DIR` = normalize(0.35, 1, 0.15): Muster hängt nur vom Winkel um diese Achse ab
+  → in jeder Blickrichtung dieselbe Schräge wie die Strahlen. Nur über dem Horizont bis etwa 30° Höhe sichtbar, zum Pol weich ausgeblendet (dort liefen Linien zusammen).
+  Intensität `fdAuroraInt` (0 = aus, dann nur Nebelverlauf) → `uAurora` in Himmel, Boden-Spiegelung und Murmel.
+  Lichtstrahlen (`fdShafts`, Untermenü „Atmosphere“): wie gestreute Planes in Unreal – zustandsloses Raster 13×13 Zellen à 8 m um den Spieler (Hash: 62 % der Zellen
+  haben einen Strahl), schräge Bänder (eine Lichtrichtung), zylindrisch zur Kamera gedreht, additiv, langsam pulsierend + wanderndes Streifen-Noise;
+  blenden unten per Nähe-Maske zum Gelände (0–3 m über `terrainH`) und zur Kamera (3–11 m) aus. Jeder Strahl blendet als Ganzes nach seinem Abstand zur
+  (ungerasteten) Spielerposition ein/aus (21–40 m, `uFade`), vollständig bevor seine Zelle das Raster verlässt → kein Aufpoppen.
+  Quer-Profil Gauß × (1 − x²)² → am Quad-Rand exakt 0.
   Bloom (`fdBloom`, Stärke, Weichheit; `flowpost.js`): Szene in eigenen Puffer (RGBA8 + Tiefe), Hellpass mit weichem Knick auf ¼ Auflösung (RGBA16F),
   trennbare Gauß-Weichzeichnung (Weichheit > 0,5 = zwei Durchgänge), pro Auge begrenzt; danach Komposition in den XR-Puffer, dann das VR-Menü (bleibt scharf).
   Kostet auf der Quest einen zusätzlichen Vollbild-Durchgang → standardmäßig aus.
-  Dithering (`DITHER_GLSL`, ±½ Farbstufe) in Himmel, Boden, Murmel, Ribbon, Ringen, Flügeln, Lichtstrahlen und Bloom gegen Treppenstufen in weichen Verläufen.
+  Dithering (`DITHER_GLSL`, ±½ Farbstufe) in Himmel, Boden, Murmel, Bloom gegen Treppenstufen in weichen Verläufen.
+  Additive Effekte (Ribbon, Ringe, Flügel, Lichtstrahlen) nutzen `ditherAdd()`: Rauschen skaliert mit dem Signal → wo nichts leuchtet, exakt schwarz
+  (sonst erhöht das auf 0 geklemmte Rauschen die ganze Fläche und Quad-Ränder werden sichtbar).
   Boden: fast schwarz, weiche Marmorierung, feine Körnung als Bump (`fdGrain`, blendet mit Entfernung aus), Fake-Spiegelung des Himmels (Fresnel),
   leuchtende Höhenlinien, die langsam nach oben wandern, maskiert mit großem weichem wanderndem Noise (`fdLines`); Abstand unregelmäßig (Höhe per Noise verzogen),
   Helligkeit und Breite je Linie per Hash, weiche Kanten. Dezenter Boden-Fresnel in Szenenfarbe (`fdFresnel`, 0 = aus),
@@ -99,22 +105,28 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   0–3 eingeschlossene Schalen (`fdLayers`) mit gravurartigen Julia-Wirbellinien; Größe `fdLayerScale` (Radius (0,8 − 0,22·k)·Skala, max. 0,95).
   Jede Schale hat eine eigene Drehung (`uShellRot[3]`, CPU): gleiche Achse wie die Kugel, Tempo 1 + (1/Radius − 1)·`fdLayerSpin` → kleinere drehen schneller.
   Innenlicht, Austritt + Hintergrund-Näherung. Roughness (`fdRough`) mit Qualität `fdRoughQ`: Fast = weichere Muster (alte Näherung),
-  4/8 rays = echte gestreute Strahlen (Mikrofacetten-Normalen pro Pixel gestreut, Brechung + Spiegelung gemittelt; teurer, aber realistisches Milchglas).
+  (Die Mehrstrahl-Variante „Realistic rays“ aus v0.17 wurde auf Wunsch wieder entfernt.) Dezenter Fresnel-Saum in Szenenfarbe (`fdBallFresnel`).
 - Begleiter (r = 0,12 m): leuchtende Kugeln (innen hell Lavendel, zum Rand Glow-Farbton), keine Fraktale, kein Halo-Sprite mehr (auf Wunsch entfernt).
-  Innenlichter (max. 9 Punktlichter `MAX_LIGHTS`) beleuchten den Boden: diffuses Kontaktlicht + glänzender Lichtstreif (Fake-Spiegelung statt echter Reflexion).
+  Innenlichter (max. 9 Punktlichter `MAX_LIGHTS`) sitzen tief in den Kugeln (Hauptkugel 0,8 r, Begleiter 0,75 r unter der Mitte, dicht über dem Boden)
+  und beleuchten den Boden: weich umgreifendes Kontaktlicht (Lambert × 0,6 + 0,4) + Glanzfleck (Fake-Spiegelung);
+  Rauheit des Glanzflecks `fdSpecRough` (Exponent 60 → 3, energieerhaltend, Reflexion zusätzlich per Noise gestreut).
 - Physik: Hangabtrieb nur am Boden (5/7 g × 0,6), Antrieb = Summen (alternativ Trigger / W / gedrückt halten) × Thrust, Reibung, Höchsttempo; Rollen über 3×3-Rotation.
   Sprung: A/B rechts oder Y links (X = Menü), Vorschau: Leertaste. Landung mit kleinem Rückprall + Aufprallklang.
   Flügel: Arme ausbreiten (Hände > ~1,1 m auseinander, etwa Schulterhöhe; Vorschau: F halten) → Federfächer wachsen, Kugel schwebt ~1,1 m über dem
   geglätteten Boden (Feder + sanftes Auf und Ab), folgt den Hügeln weich; in der Luft kein Hangabtrieb, kein Pfad, kein Rollgeräusch.
 - Begleiter-Physik: rollen immer am Boden, magnetisch zur Hauptkugel (Zug ∝ Abstand × (1 + 0,35·Abstand), `fdMagnet`), nahe dran Bremsen relativ zur Hauptkugel;
   unabhängig von Blick/Kamera. Weiche Kollisionen (Hauptkugel schwerer, Rückprall 0,25) mit leisem räumlichem Glas-Klicken.
+  Stoß Begleiter ↔ Hauptkugel erzeugt kleine helle Splitter (`sparkChips`, Menge `fdSparks`): fliegen fächerförmig weg, leichte Schwerkraft,
+  ein kleiner Abpraller, bleiben 2–4 s am Boden liegen und verglimmen (eigener Punkt-Puffer `chips`).
 - Richtung/Kamera: Blickrichtung + rechter Stick lenkt; linker Stick dreht die Ansicht um die Kugel. `fdCam` 0 = POV über der Kugel … 1 = Third Person.
   Weltansicht = XR-Ansicht × inverse(Rig); VR-Menü mit lokaler Ansicht.
-- Effekte: Partikelpfad (nur am Boden), Warp-Ringe (starten klein, wachsen, dicht, dezent), Ribbon (blendet vor der Kamera aus), Goals, Explosionen, Flügel.
+- Effekte: Partikelpfad (nur am Boden; kleine, scharfe Punkte, die glitzern: `uGlitter` → meist gedämpft, kurze helle Aufblitzer je Partikel), Warp-Ringe (starten klein, wachsen, dicht, dezent), Ribbon (blendet vor der Kamera aus), Goals, Explosionen, Flügel.
   Weiche Schnitte (`SOFT_GLSL`): Ribbon, Ringe, Leucht-Sprites und Flügel blenden analytisch aus, je näher sie Gelände (`terrainH`) oder Hauptkugel kommen
   (kein Tiefenpuffer nötig; Sprites rekonstruieren ihre Pixel-Weltposition über die Kamera-Achsen).
 - Klang (`flowsound.js`, synthetisiert, je Klang eine Methode → später gegen Dateien tauschbar), alles außer Musik binaural (HRTF-PannerNode, Hörer = Kopf):
-  Rollen am Auflagepunkt, Chime am Goal, Aufprall bei Landung, Klicken bei Kollisionen, Schnurren je Begleiter. Musik generativ, nicht räumlich, lauter mit Tempo.
+  Rollen am Auflagepunkt, Chime am Goal, Aufprall bei Landung, Klicken bei Kollisionen, Schnurren je Begleiter.
+  Nur die 4 neuesten Begleiter schnurren (`limitPurrs`): ältere blenden ~4 s aus und werden abgebaut (viele HRTF-Quellen erzeugten Knacken);
+  Positionen der Schnurr-Quellen werden nur ~25×/s nachgeführt (weniger Automations-Ereignisse). Musik generativ, nicht räumlich, lauter mit Tempo.
 - Depth-Buffer an (XR-Layer `depth: true`), Reihenfolge: Himmel → Gelände → Kugeln (deckend) → additive Effekte.
 - Tests: `?debug=1` legt den Zustand als `window.__fd` offen.
 

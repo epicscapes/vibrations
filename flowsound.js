@@ -47,7 +47,11 @@ export class FlowAudio {
     this.purrs = new Map();
   }
 
-  setVolumes(v) { Object.assign(this.volumes, v); }
+  setVolumes(v) {
+    Object.assign(this.volumes, v);
+    const t = this.ctx.currentTime;
+    for (const e of this.purrs.values()) if (!e.fading) e.vol.gain.setTargetAtTime(this.volumes.purr * 0.9, t, 0.3);
+  }
 
   // Binaurale Quelle im Raum (HRTF); Hörer = Kopf (siehe listener())
   _panner(pos, ref = 0.8) {
@@ -179,17 +183,36 @@ export class FlowAudio {
     src.connect(hp).connect(lp).connect(am).connect(breathGain).connect(vol).connect(panner).connect(this.master);
     vol.gain.setTargetAtTime(this.volumes.purr * 0.9, ctx.currentTime, 1.5);   // sanft einblenden
     src.start(); buzz.start(); breath.start();
-    this.purrs.set(id, { panner, vol, nodes: [src, buzz, breath] });
+    this.purrs.set(id, { panner, vol, nodes: [src, buzz, breath], born: ctx.currentTime, fading: false, frame: 0 });
+    this.limitPurrs();
+  }
+
+  // Viele HRTF-Quellen gleichzeitig überlasten den Audio-Thread (Knacken):
+  // nur die neuesten MAX_PURRS schnurren, ältere blenden langsam aus und werden danach abgebaut.
+  limitPurrs(max = 4) {
+    const active = [...this.purrs.entries()].filter(([, e]) => !e.fading).sort((a, b) => b[1].born - a[1].born);
+    const t = this.ctx.currentTime;
+    for (const [id, e] of active.slice(max)) {
+      e.fading = true;
+      e.vol.gain.cancelScheduledValues(t);
+      e.vol.gain.setValueAtTime(e.vol.gain.value, t);
+      e.vol.gain.setTargetAtTime(0, t, 1.2);           // ~4 s weich aus
+      for (const n of e.nodes) n.stop(t + 6);
+      setTimeout(() => {
+        try { e.panner.disconnect(); } catch {}
+        if (this.purrs.get(id) === e) this.purrs.delete(id);
+      }, 6500);
+    }
   }
 
   movePurr(id, p) {
     const e = this.purrs.get(id);
-    if (!e) return;
+    if (!e || e.fading) return;
+    if (e.frame++ % 3) return;                        // Position nur ~25×/s nachführen (weniger Automations-Ereignisse)
     const t = this.ctx.currentTime;
-    e.panner.positionX.setTargetAtTime(p[0], t, 0.05);
-    e.panner.positionY.setTargetAtTime(p[1], t, 0.05);
-    e.panner.positionZ.setTargetAtTime(p[2], t, 0.05);
-    e.vol.gain.setTargetAtTime(this.volumes.purr * 0.9, t, 0.3);
+    e.panner.positionX.setTargetAtTime(p[0], t, 0.06);
+    e.panner.positionY.setTargetAtTime(p[1], t, 0.06);
+    e.panner.positionZ.setTargetAtTime(p[2], t, 0.06);
   }
 
   clearPurrs() {
