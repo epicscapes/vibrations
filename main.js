@@ -12,7 +12,6 @@ const VERSION = 'v' + (window.VIBRATIONS_VERSION || '?');   // wird in index.htm
 
 // ---------- Feste Szenenwerte ----------
 const params = new URLSearchParams(location.search);
-const SUPERSAMPLE = parseFloat(params.get('scale') || '1.5'); // 150 % der nativen Display-Auflösung
 const SCENE = {
   center: [0, 0, -5],          // Wasserebene 5 m vor dem Startpunkt, auf Augenhöhe
   half: 8.0,                   // Quad 16 × 16 m
@@ -84,18 +83,25 @@ const SECTIONS = [
     sandWind:   { label: 'Sand: wind toward me', min: 0, max: 1.5, step: 0.05, def: 0.25 },
     follow:     { label: 'Center follows gaze', toggle: true, def: false },
   }},
+  { title: 'Display', items: {
+    // gilt nur für diese Experience und wird nicht gespeichert (jedes Laden startet mit 150 %)
+    superSample: { label: 'Supersampling (%)', min: 100, max: 300, step: 10, def: 150, session: true },
+  }},
 ];
 // Feste Werte (früher Regler)
 const FIXED = { echoSat: 0.5, echoHue: 0.2, hueShift: 1, edgeSoft: 0.6, followSpeed: 2.0 };
 
 const S = { ...FIXED };
 for (const sec of SECTIONS) for (const [k, d] of Object.entries(sec.items)) {
-  let v = load('set.' + k, d.def);
+  let v = d.session ? d.def : load('set.' + k, d.def);
   // gespeicherte Werte, die es nicht mehr gibt (entfernte Optionen), auf Standard zurücksetzen
   if (d.options && !d.options.some(([ov]) => ov === v)) v = d.def;
   if (d.min !== undefined && !(v >= d.min && v <= d.max)) v = d.def;
   S[k] = v;
 }
+
+// ?scale=1.2 in der Adresse setzt den Startwert des Supersamplings (zum Testen)
+if (params.get('scale')) S.superSample = Math.round(parseFloat(params.get('scale')) * 100);
 
 const ui = {
   version: document.getElementById('version'),
@@ -679,7 +685,7 @@ const inputs = {}, fxInputs = {};
 // Zentrale Stelle für Wertänderungen (Browser-UI und VR-Menü)
 function setSetting(key, value) {
   S[key] = value;
-  save('set.' + key, value);
+  if (key !== 'superSample') save('set.' + key, value);
   applySetting(key);
   const el = inputs[key];
   if (el) { if (el.type === 'checkbox') el.checked = value; else el.value = value; el.dispatchEvent(new Event('sync')); }
@@ -693,7 +699,21 @@ function setEffect(key, on) {
   if (vrMenu) vrMenu.markDirty();
 }
 
+// Supersampling während der VR-Sitzung ändern: Bildpuffer neu anlegen (kurz nach dem letzten Reglerschritt)
+let scaleTimer = null;
+function applySupersampling() {
+  clearTimeout(scaleTimer);
+  scaleTimer = setTimeout(() => {
+    if (!xrSession) return;
+    const native = XRWebGLLayer.getNativeFramebufferScaleFactor(xrSession) || 1;
+    const layer = new XRWebGLLayer(xrSession, gl, { antialias: false, depth: false, framebufferScaleFactor: native * S.superSample / 100 });
+    xrSession.updateRenderState({ baseLayer: layer });
+    ui.status.textContent = `XR framebuffer: ${layer.framebufferWidth}×${layer.framebufferHeight} (${S.superSample} %)`;
+  }, 350);
+}
+
 function applySetting(key) {
+  if (key === 'superSample') applySupersampling();
   if (key === 'simRes') setSimRes(S.simRes);
   if (key === 'fracRes' || key === 'fracCount') setFracLayers(S.fracRes, S.fracCount);
   if (!fx) return;
@@ -808,13 +828,13 @@ async function startXR() {
   const layer = new XRWebGLLayer(session, gl, {
     antialias: false,
     depth: false,
-    framebufferScaleFactor: native * SUPERSAMPLE,
+    framebufferScaleFactor: native * S.superSample / 100,
   });
   session.updateRenderState({ baseLayer: layer, depthNear: 0.1, depthFar: 100 });
   refSpace = await session.requestReferenceSpace('local');
 
   ui.status.textContent = `XR framebuffer: ${layer.framebufferWidth}×${layer.framebufferHeight} ` +
-    `(factor ${(native * SUPERSAMPLE).toFixed(2)})`;
+    `(${S.superSample} %)`;
   console.log(ui.status.textContent);
 
   session.addEventListener('end', () => {

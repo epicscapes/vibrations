@@ -15,8 +15,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Soothing Ripples: `main.js`, `shaders.js`. Flow Drift: `flowdrift.js`, `flowshaders.js`, `flowsound.js`.
   Jede Experience lädt als eigenes Modul (Seitenwechsel per Reload) – keine Aufräum-Logik zwischen Experiences nötig.
 - Einstellungen aller Experiences in localStorage (`set.<key>`); Stimm-Einstellungen (`volume`, `dry`, `gateThr`, `fx.*`) sind geteilt, Flow-Drift-Schlüssel beginnen mit `fd`.
-- Rendering: **Antialiasing aus**, **Supersampling 150 %** der nativen Quest-Auflösung
-  (`framebufferScaleFactor = getNativeFramebufferScaleFactor() * 1.5`). Testweise änderbar per URL: `?scale=1.0`.
+- Rendering: **Antialiasing aus**, **Supersampling** standardmäßig 150 % der nativen Quest-Auflösung, im Menü „Display“ pro Sitzung 100–300 %.
 - **Hosting: GitHub Pages** aus dem `main`-Branch (Root). HTTPS ist Pflicht für WebXR – Pages liefert das.
 - Mikrofon über Web Audio API (getUserMedia), Freigabe per Button vor dem Start von VR.
 
@@ -76,23 +75,31 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.14.0)
+## Flow Drift (Stand v0.15.0)
+- Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
+  Himmel: Aurora-Schleier rundherum (schräge, langsam wandernde Bänder), keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
+  Boden: fast schwarz, weiche Marmorierung, Fake-Spiegelung des Himmels (Fresnel) + Höhennebel (am Boden am dichtesten, Szenenfarbe), Geländerand komplett im Nebel.
+  Grundfarben `GLOW`/`AUR_*`/`FOG` in `BASE_GLSL` (JS-Kopie `GLOW` in flowdrift.js) – alles per Hue-Shift nach Stimmfrequenz.
 - Level 1 „Rolling Hills“: unendliches Sinus-Hügel-Gelände (`terrainH` identisch in `flowshaders.js` TERRAIN_GLSL und `flowdrift.js` – beide gleich halten),
-  Gitter 180² über 110 m, mitwandernd und auf Zellen gerastet; Fresnel-Shader, feine Höhenlinien, Lichtpfütze unter der Kugel, Nebel, Himmel mit Horizont-Schimmer und Sternen.
-  Weitere Levels: Option `fdLevel` (bisher nur Level 1) – neue Level brauchen eigene Höhenfunktion in JS und GLSL.
-- Kugel (r = 0,3 m): Fresnel + stereografisch projizierte Julia-Muster auf der Oberfläche (drehen sich mit), Glanzpunkt.
-  Physik: Hangabtrieb (5/7 g × 0,6), Antrieb = Summen (alternativ Trigger, in der Vorschau W/gedrückt halten) × Thrust, Reibung, Höchsttempo; Rollen über 3×3-Rotation.
-- Richtung: Blickrichtung (Kopf, um Rig-Drehung gedreht); rechter Stick lenkt zusätzlich relativ zur Blickrichtung. Linker Stick dreht die Ansicht um die Kugel (fließend).
-- Kamera-Rig: Ursprung des XR-Raums folgt der Kugel weich. `fdCam` 0 = POV (direkt über der Kugel) … 1 = Third Person (3,2 m dahinter, 1,6 m hoch), stufenlos.
-  Weltansicht = XR-Ansicht × inverse(Rig). VR-Menü wird mit der lokalen Ansicht gezeichnet (hängt an der Hand, nicht an der Welt).
-- Effekte (Farbton nach Stimmfrequenz, ohne Summen langsam zurück): schimmernder Partikelpfad (Ringpuffer 30 000, Dichte pro Meter, Lebensdauer),
-  Warp-Ringe beim Antrieb (strahlen nach hinten), Ribbon-Schweif (zur Kamera gedrehtes Band, blendet vor der Kamera aus),
-  Goals (leuchtende Sprites, Einsammeln → Chime + Explosion, Ersatz-Goal weiter weg), Begleitkugeln aus manchen Goals (Federbewegung um die Kugel, max. 8).
-- Klang (`flowsound.js`, alles synthetisiert, je Klang eine Methode → später gegen Dateien tauschbar): Rollen (Rauschen + Holzresonanz, AM mit Drehfrequenz),
-  Chime (Glocke, pentatonisch), Schnurren je Begleiter (gefiltertes Rauschen mit ~25 Hz Brummen + Atmen, HRTF-PannerNode, Hörer = Kopf),
-  generative Musik (Flächen I–vi–ii–V + pentatonische Töne), lauter und heller mit Tempo. Stimmeffekte wie in Soothing Ripples.
-- Depth-Buffer an (XR-Layer `depth: true`), Reihenfolge: Himmel → Gelände → Kugel → additive Effekte (Tiefentest, ohne Tiefe schreiben).
+  Gitter 180² über 110 m, mitwandernd und auf Zellen gerastet. Weitere Levels: Option `fdLevel` – brauchen eigene Höhenfunktion in JS und GLSL.
+- Kugeln (Haupt r = 0,3 m, Begleiter r = 0,12 m): gläsern (vormultipliziert geblendet), Julia-Wirbel drehen sich mit, Innenlicht, Aurora-Spiegelung am Rand.
+  Innenlichter (max. 9 Punktlichter `MAX_LIGHTS`) beleuchten den Boden: diffuses Kontaktlicht + glänzender Lichtstreif (Fake-Spiegelung statt echter Reflexion).
+- Physik: Hangabtrieb nur am Boden (5/7 g × 0,6), Antrieb = Summen (alternativ Trigger / W / gedrückt halten) × Thrust, Reibung, Höchsttempo; Rollen über 3×3-Rotation.
+  Sprung: A/B rechts oder Y links (X = Menü), Vorschau: Leertaste. Landung mit kleinem Rückprall + Aufprallklang.
+  Flügel: Arme ausbreiten (Hände > ~1,1 m auseinander, etwa Schulterhöhe; Vorschau: F halten) → Federfächer wachsen, Kugel schwebt ~1,1 m über dem
+  geglätteten Boden (Feder + sanftes Auf und Ab), folgt den Hügeln weich; in der Luft kein Hangabtrieb, kein Pfad, kein Rollgeräusch.
+- Begleiter: rollende 3D-Kugeln mit eigener Physik (Wunschtempo = Tempo der Hauptkugel + Korrektur zum versetzten Platz dahinter), Abstand zueinander, schweben mit.
+- Richtung/Kamera: Blickrichtung + rechter Stick lenkt; linker Stick dreht die Ansicht um die Kugel. `fdCam` 0 = POV über der Kugel … 1 = Third Person.
+  Weltansicht = XR-Ansicht × inverse(Rig); VR-Menü mit lokaler Ansicht.
+- Effekte: Partikelpfad (nur am Boden), Warp-Ringe (dünn, dezent, Tunnel hinter der Kugel), Ribbon (dezent, blendet vor der Kamera aus), Goals, Explosionen, Flügel.
+- Klang (`flowsound.js`, synthetisiert, je Klang eine Methode → später gegen Dateien tauschbar), alles außer Musik binaural (HRTF-PannerNode, Hörer = Kopf):
+  Rollen am Auflagepunkt, Chime am Goal, Aufprall bei Landung, Schnurren je Begleiter. Musik generativ, nicht räumlich, lauter mit Tempo.
+- Depth-Buffer an (XR-Layer `depth: true`), Reihenfolge: Himmel → Gelände → Kugeln (Glas) → additive Effekte.
 - Tests: `?debug=1` legt den Zustand als `window.__fd` offen.
+
+## Gemeinsam: Display
+- Untermenü „Display“ in jeder Experience: Supersampling 100–300 % (Standard 150 %). Wird NICHT gespeichert – jede Experience/jedes Laden startet mit 150 %
+  (`session: true` in der Einstellung). Änderung in VR legt den XR-Bildpuffer kurz nach dem letzten Reglerschritt neu an. `?scale=` setzt den Startwert.
 
 ## Entscheidungen
 - Keine Einbindung in epicscapes.de (Adobe Portfolio) vorerst.

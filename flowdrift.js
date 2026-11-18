@@ -2,7 +2,7 @@
 // Vanilla WebGL2 + WebXR. Teilt Stimmerkennung/-effekte (audio.js) und VR-Menü (vrmenu.js) mit Soothing Ripples.
 import {
   skyVS, skyFS, terrainVS, terrainFS, ballVS, ballFS, sparkVS, sparkFS,
-  ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS,
+  ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS, wingVS, wingFS, WING_FEATHERS, MAX_LIGHTS,
 } from './flowshaders.js';
 import { FlowAudio } from './flowsound.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
@@ -14,8 +14,8 @@ import {
 
 const VERSION = 'v' + (window.VIBRATIONS_VERSION || '?');
 const params = new URLSearchParams(location.search);
-const SUPERSAMPLE = parseFloat(params.get('scale') || '1.5');
 const R = 0.3;                // Kugelradius (m)
+const RC = 0.12;              // Radius der Begleitkugeln (m)
 const G = 9.81;
 
 // ---------- Gelände (Level 1 „Rolling Hills“) – identisch zu TERRAIN_GLSL in flowshaders.js ----------
@@ -66,14 +66,21 @@ const SECTIONS = [
     fdSfx:   { label: 'Goal sound volume', min: 0, max: 1.5, step: 0.05, def: 0.8 },
     fdPurr:  { label: 'Purr volume', min: 0, max: 1.5, step: 0.05, def: 0.8 },
   }},
+  { title: 'Display', items: {
+    // gilt nur für diese Experience und wird nicht gespeichert (jedes Laden startet mit 150 %)
+    superSample: { label: 'Supersampling (%)', min: 100, max: 300, step: 10, def: 150, session: true },
+  }},
 ];
 const S = {};
 for (const sec of SECTIONS) for (const [k, d] of Object.entries(sec.items)) {
-  let v = load('set.' + k, d.def);
+  let v = d.session ? d.def : load('set.' + k, d.def);
   if (d.options && !d.options.some(([ov]) => ov === v)) v = d.def;
   if (d.min !== undefined && !(v >= d.min && v <= d.max)) v = d.def;
   S[k] = v;
 }
+
+// ?scale=1.2 in der Adresse setzt den Startwert des Supersamplings (zum Testen)
+if (params.get('scale')) S.superSample = Math.round(parseFloat(params.get('scale')) * 100);
 
 const ui = {
   version: document.getElementById('version'),
@@ -85,7 +92,7 @@ const ui = {
   preview: document.getElementById('preview'),
 };
 ui.version.textContent = `Vibrations ${VERSION} · Flow Drift`;
-ui.status.textContent = 'Hold / W = hum · A/D = turn view · ←/→ = steer';
+ui.status.textContent = 'Hold / W = hum · A/D = turn view · ←/→ = steer · Space = jump · F = wings';
 
 // ---------- WebGL2 ----------
 const canvas = document.getElementById('c');
@@ -114,7 +121,7 @@ function program(vs, fs) {
 const P = {
   sky: program(skyVS, skyFS), terrain: program(terrainVS, terrainFS), ball: program(ballVS, ballFS),
   spark: program(sparkVS, sparkFS), ring: program(ringVS, ringFS), ribbon: program(ribbonVS, ribbonFS),
-  glow: program(glowVS, glowFS),
+  glow: program(glowVS, glowFS), wing: program(wingVS, wingFS),
 };
 const emptyVao = gl.createVertexArray();
 
@@ -165,7 +172,11 @@ function pointBuffer(capacity) {
 }
 
 // ---------- Zustand ----------
-const ball = { pos: [0, terrainH(0, 0) + R, 0], vel: [0, 0], rot: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]) };
+const ball = { pos: [0, terrainH(0, 0) + R, 0], vel: [0, 0], vy: 0, rot: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]) };
+let grounded = 1;                 // 1 = rollt auf dem Boden, 0 = in der Luft
+let groundSmooth = terrainH(0, 0);// geglättete Bodenhöhe (Schweben folgt den Hügeln weich)
+let wing = 0, wingGoal = 0;       // Flügel 0..1 (Arme ausbreiten)
+let jumpPressed = false, jumpPrev = false;
 let yaw = 0;                      // Drehung der Ansicht um die Kugel
 let rigPos = null;                // Weltposition des XR-Ursprungs (folgt der Kugel weich)
 let time = 0, hue = 0, propel = 0, driveVis = 0;
@@ -174,6 +185,7 @@ let headFwd = [0, -1];            // Blickrichtung (xz, Welt)
 let manualHum = false;
 const keys = new Set();
 let stick = [0, 0], turn = 0, trigger = 0;
+const IDENT3 = () => new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 
 // Zufall mit Saat (Goals sollen bei jedem Start gleich verteilt sein)
 let seed = 12345;
@@ -262,10 +274,11 @@ function update(dt) {
     dir = [dir[0] / l, dir[1] / l];
   }
 
-  // Physik: Hangabtrieb (rollende Kugel: 5/7 g), Antrieb, Reibung
+  // Physik: Hangabtrieb (rollende Kugel: 5/7 g, nur am Boden), Antrieb, Reibung
   const [gx, gz] = terrainGrad(ball.pos[0], ball.pos[2]);
-  const ax = -(5 / 7) * G * gx * 0.6 + dir[0] * propel * S.fdThrust;
-  const az = -(5 / 7) * G * gz * 0.6 + dir[1] * propel * S.fdThrust;
+  const slope = (5 / 7) * G * 0.6 * grounded;
+  const ax = -slope * gx + dir[0] * propel * S.fdThrust;
+  const az = -slope * gz + dir[1] * propel * S.fdThrust;
   ball.vel[0] += ax * dt; ball.vel[1] += az * dt;
   const damp = Math.exp(-S.fdFriction * dt);
   ball.vel[0] *= damp; ball.vel[1] *= damp;
@@ -274,7 +287,7 @@ function update(dt) {
   const prev = [...ball.pos];
   ball.pos[0] += ball.vel[0] * dt;
   ball.pos[2] += ball.vel[1] * dt;
-  ball.pos[1] = terrainH(ball.pos[0], ball.pos[2]) + R;
+  updateVertical(dt);
   if (speed > 0.2) moveDir = [ball.vel[0] / speed, ball.vel[1] / speed];
   else moveDir = dir;
 
@@ -288,7 +301,7 @@ function update(dt) {
   }
 
   driveVis += (propel - driveVis) * Math.min(dt * 4, 1);
-  emitTrail(dist);
+  emitTrail(dist * grounded);
   updateRings(dt);
   updateHistory();
   updateGoals(dt);
@@ -296,11 +309,43 @@ function update(dt) {
 
   if (sound) {
     sound.resume();
-    sound.roll(speed, R);
+    sound.roll(speed, R, [ball.pos[0], ball.pos[1] - R, ball.pos[2]], grounded);
     sound.music(speed);
   }
   if (fx) fx.update(hum.level, hum.pitch, hum.rms);
   return speed;
+}
+
+// Senkrechte Bewegung: Sprung, Schweben mit Flügeln (organisch federnd über den Hügeln), Landung
+function updateVertical(dt) {
+  const gh = terrainH(ball.pos[0], ball.pos[2]);
+  groundSmooth += (gh - groundSmooth) * Math.min(dt * 1.2, 1);
+  wing += (wingGoal - wing) * Math.min(dt * (wingGoal > wing ? 1.6 : 1.0), 1);
+  const floor = gh + R;
+  const onGround = ball.pos[1] <= floor + 0.02;
+
+  // Sprung (Taste, nur am Boden)
+  if (jumpPressed && !jumpPrev && onGround) ball.vy = 4.3;
+  jumpPrev = jumpPressed;
+
+  // Schweben: Feder zu einer Höhe über dem geglätteten Boden, sanftes Auf und Ab
+  let acc = -G * (1 - wing);
+  if (wing > 0.02) {
+    const target = Math.max(groundSmooth + R + wing * (1.1 + 0.18 * Math.sin(time * 0.9)) + 0.07 * Math.sin(time * 2.3) * wing, floor + 0.15 * wing);
+    acc += ((target - ball.pos[1]) * 6 - ball.vy * 2.6) * wing;
+  }
+  ball.vy += acc * dt;
+  ball.pos[1] += ball.vy * dt;
+  if (ball.pos[1] <= floor) {
+    if (ball.vy < -1.2) {
+      if (sound) sound.thud([ball.pos[0], gh, ball.pos[2]], -ball.vy / 6);
+      ball.vy = -ball.vy * 0.22;           // kleiner Rückprall
+      if (ball.vy < 0.4) ball.vy = 0;
+    } else ball.vy = Math.max(ball.vy, 0);
+    ball.pos[1] = floor;
+  }
+  const air = ball.pos[1] - floor;
+  grounded = Math.max(0, 1 - air / 0.08);
 }
 
 function emitTrail(dist) {
@@ -333,15 +378,16 @@ function uploadTrail() {
   trailDirty.length = 0;
 }
 
+const RING_LIFE = 1.6;
 function updateRings(dt) {
   if (S.fdRings > 0 && propel > 0.12) {
-    ringTimer += dt * propel * 3.2;
+    ringTimer += dt * propel * 6;
     if (ringTimer > 1) {
       ringTimer = 0;
       rings.push({ pos: [...ball.pos], back: [-moveDir[0], 0, -moveDir[1]], birth: time, hue });
     }
   }
-  while (rings.length && time - rings[0].birth > 1.2) rings.shift();
+  while (rings.length && time - rings[0].birth > RING_LIFE) rings.shift();
 }
 
 function updateHistory() {
@@ -357,7 +403,7 @@ function updateGoals(dt) {
     const d = Math.hypot(g.x - ball.pos[0], gy - ball.pos[1], g.z - ball.pos[2]);
     if (d < R + 0.55) {
       explode([g.x, gy, g.z], hue + g.hue);
-      if (sound) sound.chime();
+      if (sound) sound.chime([g.x, gy, g.z]);
       if (g.companion && companions.length < 8) spawnCompanion([g.x, gy, g.z]);
       goals.splice(i, 1);
       goals.push(placeGoal(ball.pos[0], ball.pos[2], 25, 55));   // Ersatz weiter weg
@@ -366,21 +412,41 @@ function updateGoals(dt) {
   while (goals.length < S.fdGoals) goals.push(placeGoal(ball.pos[0], ball.pos[2], 20, 55));
   if (goals.length > S.fdGoals) goals.length = S.fdGoals;
 
+  // Begleiter: eigene Rollkugeln, laufen versetzt hinter der Hauptkugel her (folgen, rollen, schweben mit)
+  const side = [-moveDir[1], moveDir[0]];
   companions.forEach((c, k) => {
-    const a = c.phase + time * 0.6;
-    const rad = 0.9 + 0.35 * (k % 3);
-    const target = [ball.pos[0] + Math.cos(a) * rad, ball.pos[1] + 0.45 + 0.2 * Math.sin(time * 1.3 + c.phase), ball.pos[2] + Math.sin(a) * rad];
-    for (let j = 0; j < 3; j++) {
-      c.vel[j] += (target[j] - c.pos[j]) * 7 * dt;
-      c.vel[j] *= Math.exp(-2.8 * dt);
-      c.pos[j] += c.vel[j] * dt;
+    const back = 0.9 + 0.5 * k;
+    const sway = Math.sin(c.phase + time * 0.5) * (0.5 + 0.2 * (k % 3)) * (k % 2 ? 1 : -1);
+    const tx = ball.pos[0] - moveDir[0] * back + side[0] * sway;
+    const tz = ball.pos[2] - moveDir[1] * back + side[1] * sway;
+    // Wunschtempo = Tempo der Hauptkugel + Korrektur zum Zielpunkt -> bleiben auch bei Fahrt dicht dran
+    const want = [ball.vel[0] + (tx - c.pos[0]) * 2.2, ball.vel[1] + (tz - c.pos[2]) * 2.2];
+    const kv = Math.min(dt * 3.5, 1);
+    c.vel[0] += (want[0] - c.vel[0]) * kv;
+    c.vel[1] += (want[1] - c.vel[1]) * kv;
+    // Abstand zur Hauptkugel und untereinander halten
+    for (const o of [{ pos: ball.pos, r: R }, ...companions.filter((x) => x !== c).map((x) => ({ pos: x.pos, r: RC }))]) {
+      const dx = c.pos[0] - o.pos[0], dz = c.pos[2] - o.pos[2], d = Math.hypot(dx, dz), min = RC + o.r + 0.05;
+      if (d < min && d > 1e-4) { c.pos[0] += dx / d * (min - d); c.pos[2] += dz / d * (min - d); }
+    }
+    const px = c.pos[0], pz = c.pos[2];
+    c.pos[0] += c.vel[0] * dt;
+    c.pos[2] += c.vel[1] * dt;
+    const gh = terrainH(c.pos[0], c.pos[2]);
+    const floatY = wing * (0.7 + 0.12 * Math.sin(time * 1.7 + c.phase));
+    c.pos[1] += (gh + RC + floatY - c.pos[1]) * Math.min(dt * (wing > 0.05 ? 3 : 20), 1);
+    const step = [c.pos[0] - px, 0, c.pos[2] - pz];
+    const d = Math.hypot(step[0], step[2]);
+    if (d > 1e-5) {
+      c.rot = mul3(axisAngle3(v3.norm(v3.cross([0, 1, 0], step)), d / RC), c.rot);
+      if (((time * 60) | 0) % 90 === k) c.rot = orthonormalize3(c.rot);
     }
     if (sound) sound.movePurr(c.id, c.pos);
   });
 }
 
 function spawnCompanion(p) {
-  const c = { id: companionId++, pos: [...p], vel: [0, 1.5, 0], phase: Math.random() * 6.28 };
+  const c = { id: companionId++, pos: [p[0], terrainH(p[0], p[2]) + RC, p[2]], vel: [0, 0], phase: Math.random() * 6.28, rot: IDENT3() };
   companions.push(c);
   if (sound) sound.addPurr(c.id);
 }
@@ -435,7 +501,7 @@ function hueRGB(rgb, a) {
   const c = Math.cos(a), s = Math.sin(a), i2 = c * i - s * q, q2 = s * i + c * q;
   return [y + 0.956 * i2 + 0.621 * q2, y - 0.272 * i2 - 0.647 * q2, y - 1.106 * i2 + 1.703 * q2].map((v) => Math.max(v, 0));
 }
-const GLOW = [1.0, 0.5, 0.18];
+const GLOW = [0.95, 0.28, 0.75];   // wie GLOW in flowshaders.js
 
 function buildRibbon(cam) {
   const n = history.length;
@@ -451,7 +517,7 @@ function buildRibbon(cam) {
     const w = R * 0.32 * Math.pow(f, 0.8);
     // weich ausblenden, je näher das Band der Kamera kommt
     const near = Math.min(Math.max((v3.len(v3.sub(cam, p)) - 0.6) / 1.5, 0), 1);
-    const alpha = Math.pow(f, 2.2) * 0.35 * near;
+    const alpha = Math.pow(f, 2.2) * 0.22 * near;
     const l = v3.add(p, v3.scale(side, w)), r = v3.sub(p, v3.scale(side, w));
     data.set([...l, alpha, -1, ...r, alpha, 1], i * 10);
   }
@@ -466,9 +532,9 @@ function uploadGlows() {
   for (const g of goals) {
     const y = terrainH(g.x, g.z) + 0.8 + 0.15 * Math.sin(time * 1.5 + g.phase);
     const pulse = 0.8 + 0.3 * Math.sin(time * 2.2 + g.phase);
-    d.set([g.x, y, g.z, g.companion ? 1.0 : 0.75, hue + g.hue, pulse, 0.6], k * 7); k++;
+    d.set([g.x, y, g.z, g.companion ? 0.9 : 0.7, hue + g.hue, pulse * 0.7, 0.35], k * 7); k++;
   }
-  for (const c of companions) { d.set([c.pos[0], c.pos[1], c.pos[2], 0.35, hue + 0.3, 1.1, 0.8], k * 7); k++; }
+  for (const c of companions) { d.set([c.pos[0], c.pos[1], c.pos[2], 0.7, hue + 0.25, 0.45, 0.4], k * 7); k++; }
   gl.bindBuffer(gl.ARRAY_BUFFER, glowBuf.buf);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, d, 0, k * 7);
   return k;
@@ -481,20 +547,49 @@ function prepareFrame(cam) {
   glowCount = uploadGlows();
 }
 
+// Innenlichter: Hauptkugel + Begleiter beleuchten den Boden (Kontaktlicht + Fake-Spiegelung)
+function lightUniforms(u) {
+  const pos = new Float32Array(MAX_LIGHTS * 3), col = new Float32Array(MAX_LIGHTS * 3);
+  const glow = hueRGB(GLOW, hue);
+  const main = 0.35 + 0.45 * driveVis;
+  pos.set(ball.pos, 0);
+  col.set(glow.map((c) => c * main), 0);
+  let n = 1;
+  for (const c of companions) {
+    if (n >= MAX_LIGHTS) break;
+    pos.set(c.pos, n * 3);
+    col.set(hueRGB(GLOW, hue + 0.25).map((x) => x * 0.22), n * 3);
+    n++;
+  }
+  gl.uniform1i(u.uLightCount, n);
+  gl.uniform3fv(u['uLightPos[0]'], pos);
+  gl.uniform3fv(u['uLightCol[0]'], col);
+}
+
+function drawBall(u, pos, r, rot, light, swirl) {
+  gl.uniform3fv(u.uPos, pos);
+  gl.uniform1f(u.uR, r);
+  gl.uniformMatrix3fv(u.uRot, false, rot);
+  gl.uniform1f(u.uLight, light);
+  gl.uniform1f(u.uSwirl, swirl);
+  gl.drawElements(gl.TRIANGLES, sphereMesh.count, gl.UNSIGNED_INT, 0);
+}
+
 function drawWorld(proj, view, cam, vpW, vpH) {
   const pxScale = proj[5] * vpH * 0.5;
 
-  // Himmel (ohne Tiefe)
+  // Himmel: Aurora + Nebel (ohne Tiefe)
   gl.disable(gl.DEPTH_TEST);
   gl.depthMask(false);
   gl.useProgram(P.sky.p);
   gl.uniformMatrix4fv(P.sky.u.uInvVP, false, invert(mul(proj, view)));
   gl.uniform3fv(P.sky.u.uCam, cam);
   gl.uniform1f(P.sky.u.uHue, hue);
+  gl.uniform1f(P.sky.u.uTime, time);
   gl.bindVertexArray(fullscreen);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-  // Gelände und Kugel (mit Tiefe)
+  // Gelände (mit Tiefe)
   gl.enable(gl.DEPTH_TEST);
   gl.depthMask(true);
   const cell = TERRAIN_SIZE / TERRAIN_N;
@@ -505,29 +600,29 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform2f(u.uOrigin, Math.round(ball.pos[0] / cell) * cell, Math.round(ball.pos[2] / cell) * cell);
   gl.uniform1f(u.uSize, TERRAIN_SIZE);
   gl.uniform3fv(u.uCam, cam);
-  gl.uniform3fv(u.uBall, ball.pos);
   gl.uniform1f(u.uHue, hue);
-  gl.uniform1f(u.uGlowAmt, driveVis);
+  gl.uniform1f(u.uTime, time);
+  gl.uniform1f(u.uFogDensity, 0.05);
+  lightUniforms(u);
   gl.bindVertexArray(terrainMesh.vao);
   gl.drawElements(gl.TRIANGLES, terrainMesh.count, gl.UNSIGNED_INT, 0);
 
+  // Kugeln: gläsern (vormultipliziert über den Hintergrund), schreiben Tiefe
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   u = P.ball.u;
   gl.useProgram(P.ball.p);
   gl.uniformMatrix4fv(u.uProj, false, proj);
   gl.uniformMatrix4fv(u.uView, false, view);
-  gl.uniform3fv(u.uPos, ball.pos);
-  gl.uniform1f(u.uR, R);
-  gl.uniformMatrix3fv(u.uRot, false, ball.rot);
   gl.uniform3fv(u.uCam, cam);
   gl.uniform1f(u.uHue, hue);
   gl.uniform1f(u.uTime, time);
-  gl.uniform1f(u.uDrive, driveVis);
   gl.bindVertexArray(sphereMesh.vao);
-  gl.drawElements(gl.TRIANGLES, sphereMesh.count, gl.UNSIGNED_INT, 0);
+  for (const c of companions) drawBall(u, c.pos, RC, c.rot, 1.3, 0.6);
+  drawBall(u, ball.pos, R, ball.rot, 0.45 + 0.55 * driveVis, 1.0);
 
   // Leuchtendes: additiv, verdeckt vom Gelände, schreibt keine Tiefe
   gl.depthMask(false);
-  gl.enable(gl.BLEND);
   gl.blendFunc(gl.ONE, gl.ONE);
 
   // Pfad + Explosionen
@@ -537,18 +632,20 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniformMatrix4fv(u.uView, false, view);
   gl.uniform1f(u.uTime, time);
   gl.uniform1f(u.uPxScale, pxScale);
-  gl.uniform1f(u.uSize, 0.03);
-  gl.uniform1f(u.uRise, 0.008);
+  gl.uniform1f(u.uSize, 0.025);
+  gl.uniform1f(u.uRise, 0.006);
+  gl.uniform1f(u.uBright, 0.55);
   gl.bindVertexArray(trail.vao);
   gl.drawArrays(gl.POINTS, 0, trail.capacity);
   if (burstList.length) {
-    gl.uniform1f(u.uSize, 0.045);
+    gl.uniform1f(u.uSize, 0.04);
     gl.uniform1f(u.uRise, 0);
+    gl.uniform1f(u.uBright, 0.9);
     gl.bindVertexArray(bursts.vao);
     gl.drawArrays(gl.POINTS, 0, burstList.length);
   }
 
-  // Goals + Begleiter
+  // Goals + Halos der Begleiter
   if (glowCount) {
     u = P.glow.u;
     gl.useProgram(P.glow.p);
@@ -570,7 +667,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, ribbonCount);
   }
 
-  // Warp-Ringe
+  // Warp-Ringe: dünn und dezent, wie ein Tunnel hinter der Kugel
   if (rings.length && S.fdRings > 0) {
     u = P.ring.u;
     gl.useProgram(P.ring.p);
@@ -578,18 +675,35 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     gl.uniformMatrix4fv(u.uView, false, view);
     gl.bindVertexArray(emptyVao);
     for (const r of rings) {
-      const age = time - r.birth, life = 1.2;
-      const center = v3.add(r.pos, v3.scale(r.back, 0.3 + age * 0.9));
-      const rad = R * 1.2 + age * 1.1;
+      const age = time - r.birth, life = RING_LIFE;
+      const center = v3.add(r.pos, v3.scale(r.back, 0.15 + age * 0.75));
+      const rad = R * 1.15 + age * 0.35;
       const ax = v3.norm(v3.cross(r.back, [0, 1, 0]));
       const ay = v3.cross(ax, r.back);
       gl.uniform3fv(u.uCenter, center);
       gl.uniform3fv(u.uU, v3.scale(ax, rad));
       gl.uniform3fv(u.uV, v3.scale(ay, rad));
-      gl.uniform3fv(u.uColor, hueRGB(GLOW, r.hue));
-      gl.uniform1f(u.uAlpha, Math.pow(1 - age / life, 2) * 0.7 * S.fdRings);
+      gl.uniform3fv(u.uColor, hueRGB([0.9, 0.18, 0.45], r.hue));
+      gl.uniform1f(u.uAlpha, Math.pow(1 - age / life, 1.5) * Math.min(age * 8, 1) * 0.38 * S.fdRings);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
+  }
+
+  // Flügel (beim Ausbreiten der Arme)
+  if (wing > 0.02) {
+    u = P.wing.u;
+    gl.useProgram(P.wing.p);
+    gl.uniformMatrix4fv(u.uProj, false, proj);
+    gl.uniformMatrix4fv(u.uView, false, view);
+    gl.uniform3fv(u.uPos, ball.pos);
+    gl.uniform3fv(u.uFwd, [moveDir[0], 0, moveDir[1]]);
+    gl.uniform1f(u.uOpen, wing);
+    gl.uniform1f(u.uFlap, time * 2.4);
+    gl.uniform1f(u.uSpan, 0.75);
+    gl.uniform1f(u.uRootR, R * 0.8);
+    gl.uniform3fv(u.uColor, hueRGB(GLOW, hue));
+    gl.bindVertexArray(emptyVao);
+    gl.drawArrays(gl.TRIANGLES, 0, WING_FEATHERS * 2 * 6);
   }
   gl.disable(gl.BLEND);
   gl.depthMask(true);
@@ -616,6 +730,8 @@ function previewFrame(t) {
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
 
   headFwd = [-Math.sin(yaw), -Math.cos(yaw)];
+  jumpPressed = keys.has(' ');
+  wingGoal = keys.has('f') ? 1 : 0;
   update(dt);
   updateRig(dt);
   // Blick leicht nach unten auf die Kugel (POV: steiler)
@@ -638,7 +754,7 @@ setPreview(previewOn);
 
 canvas.addEventListener('pointerdown', () => { manualHum = true; ensureSound(); });
 addEventListener('pointerup', () => { manualHum = false; });
-addEventListener('keydown', (e) => { keys.add(e.key.toLowerCase()); });
+addEventListener('keydown', (e) => { keys.add(e.key.toLowerCase()); if (e.key === ' ') e.preventDefault(); });
 addEventListener('keyup', (e) => { keys.delete(e.key.toLowerCase()); });
 
 // ---------- Einstellungs-Oberfläche (wie in Soothing Ripples) ----------
@@ -646,7 +762,21 @@ const fxState = {};
 const inputs = {}, fxInputs = {};
 function decimals(step) { return step >= 1 ? 0 : Math.min(Math.ceil(-Math.log10(step)), 4); }
 
+// Supersampling während der VR-Sitzung ändern: Bildpuffer neu anlegen (kurz nach dem letzten Reglerschritt)
+let scaleTimer = null;
+function applySupersampling() {
+  clearTimeout(scaleTimer);
+  scaleTimer = setTimeout(() => {
+    if (!xrSession) return;
+    const native = XRWebGLLayer.getNativeFramebufferScaleFactor(xrSession) || 1;
+    const layer = new XRWebGLLayer(xrSession, gl, { antialias: false, depth: true, framebufferScaleFactor: native * S.superSample / 100 });
+    xrSession.updateRenderState({ baseLayer: layer });
+    ui.status.textContent = `XR framebuffer: ${layer.framebufferWidth}×${layer.framebufferHeight} (${S.superSample} %)`;
+  }, 350);
+}
+
 function applySetting(key) {
+  if (key === 'superSample') applySupersampling();
   if (key === 'fdGoals' || key === 'fdCompanion') { /* wirkt beim nächsten Nachfüllen */ }
   if (key.startsWith('fdMusic') || key.startsWith('fdRoll') || key.startsWith('fdSfx') || key.startsWith('fdPurr')) applyVolumes();
   if (!fx) return;
@@ -656,7 +786,7 @@ function applySetting(key) {
 }
 function setSetting(key, value) {
   S[key] = value;
-  save('set.' + key, value);
+  if (key !== 'superSample') save('set.' + key, value);
   applySetting(key);
   const el = inputs[key];
   if (el) { if (el.type === 'checkbox') el.checked = value; else el.value = value; el.dispatchEvent(new Event('sync')); }
@@ -771,7 +901,7 @@ async function startXR() {
   xrSession = session;
   await gl.makeXRCompatible();
   const native = XRWebGLLayer.getNativeFramebufferScaleFactor(session) || 1;
-  const layer = new XRWebGLLayer(session, gl, { antialias: false, depth: true, framebufferScaleFactor: native * SUPERSAMPLE });
+  const layer = new XRWebGLLayer(session, gl, { antialias: false, depth: true, framebufferScaleFactor: native * S.superSample / 100 });
   session.updateRenderState({ baseLayer: layer, depthNear: 0.05, depthFar: 200 });
   refSpace = await session.requestReferenceSpace('local');
   session.addEventListener('end', () => {
@@ -796,14 +926,31 @@ function xrFrame(t, frame) {
   const menuBusy = vrMenu.update(frame, refSpace, [hp.x, hp.y, hp.z]);
 
   // Controller: rechter Stick lenkt, linker Stick dreht die Ansicht, Trigger = Antrieb (Alternative zum Summen)
-  stick = [0, 0]; turn = 0; trigger = 0;
+  stick = [0, 0]; turn = 0; trigger = 0; jumpPressed = false;
+  const hands = {};
   for (const src of session.inputSources) {
     const gp = src.gamepad;
     if (!gp) continue;
+    // Sprung: A/B (rechts) oder Y (links); X bleibt fürs Menü
+    const b = gp.buttons;
+    if (src.handedness === 'right' && ((b[4] && b[4].pressed) || (b[5] && b[5].pressed))) jumpPressed = true;
+    if (src.handedness === 'left' && b[5] && b[5].pressed) jumpPressed = true;
+    const gpose = frame.getPose(src.gripSpace || src.targetRaySpace, refSpace);
+    if (gpose) hands[src.handedness] = gpose.transform.position;
     const ax = gp.axes.length >= 4 ? [gp.axes[2], gp.axes[3]] : [gp.axes[0] || 0, gp.axes[1] || 0];
     const dz = (v) => (Math.abs(v) < 0.12 ? 0 : v);
     if (src.handedness === 'right') { stick = [dz(ax[0]), dz(ax[1])]; if (!menuBusy) trigger = Math.max(trigger, gp.buttons[0]?.value || 0); }
     if (src.handedness === 'left') { turn = dz(ax[0]); trigger = Math.max(trigger, gp.buttons[0]?.value || 0); }
+  }
+
+  // Arme ausbreiten -> Flügel: Hände weit auseinander (> ~1,1 m) und etwa auf Schulterhöhe
+  wingGoal = 0;
+  if (hands.left && hands.right) {
+    const span = Math.hypot(hands.left.x - hands.right.x, hands.left.z - hands.right.z);
+    const lowest = Math.min(hands.left.y, hands.right.y);
+    const s = Math.min(Math.max((span - 0.95) / 0.3, 0), 1);
+    const h = Math.min(Math.max((lowest - (hp.y - 0.75)) / 0.25, 0), 1);
+    wingGoal = s * h;
   }
 
   // Blickrichtung in Welt: Kopf-Vorwärts (lokal) um die Rig-Drehung gedreht, auf die Ebene projiziert

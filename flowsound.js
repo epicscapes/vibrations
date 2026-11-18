@@ -49,6 +49,20 @@ export class FlowAudio {
 
   setVolumes(v) { Object.assign(this.volumes, v); }
 
+  // Binaurale Quelle im Raum (HRTF); Hörer = Kopf (siehe listener())
+  _panner(pos, ref = 0.8) {
+    const p = new PannerNode(this.ctx, {
+      panningModel: 'HRTF', distanceModel: 'inverse', refDistance: ref, rolloffFactor: 1.2, maxDistance: 60,
+    });
+    if (pos) this._place(p, pos, 0);
+    return p;
+  }
+  _place(p, pos, tc = 0.04) {
+    const t = this.ctx.currentTime;
+    if (tc) { p.positionX.setTargetAtTime(pos[0], t, tc); p.positionY.setTargetAtTime(pos[1], t, tc); p.positionZ.setTargetAtTime(pos[2], t, tc); }
+    else { p.positionX.value = pos[0]; p.positionY.value = pos[1]; p.positionZ.value = pos[2]; }
+  }
+
   // ---------- Rollen: Marmorkugel auf Holzboden ----------
   // Rauschen durch Bandpass (Holzresonanz) + tiefes Grollen, amplitudenmoduliert mit der Drehfrequenz.
   _initRoll() {
@@ -66,28 +80,32 @@ export class FlowAudio {
     this.rollGain = g(0);
     src.connect(bp).connect(body).connect(this.rollAM);
     src.connect(lp).connect(g(1.6)).connect(this.rollAM);
-    this.rollAM.connect(this.rollGain).connect(this.master);
+    this.rollPan = this._panner(null, 1.0);
+    this.rollAM.connect(this.rollGain).connect(this.rollPan).connect(this.master);
     src.start();
     Object.assign(this, { rollBP: bp, rollLP: lp, rollLFO: lfo });
   }
 
-  roll(speed, radius) {
+  // pos = Auflagepunkt der Kugel; grounded = 0..1 (in der Luft verstummt das Rollen)
+  roll(speed, radius, pos, grounded = 1) {
     const now = this.ctx.currentTime;
     const s = Math.min(speed / 8, 1);
-    this.rollGain.gain.setTargetAtTime(this.volumes.roll * 0.35 * Math.pow(s, 0.7), now, 0.08);
+    if (pos) this._place(this.rollPan, pos);
+    this.rollGain.gain.setTargetAtTime(this.volumes.roll * 0.45 * Math.pow(s, 0.7) * grounded, now, 0.08);
     this.rollBP.frequency.setTargetAtTime(500 + s * 1400, now, 0.1);
     this.rollLP.frequency.setTargetAtTime(110 + s * 180, now, 0.1);
     this.rollLFO.frequency.setTargetAtTime(Math.max(speed / (2 * Math.PI * radius), 0.5), now, 0.1);
   }
 
   // ---------- Goal eingesammelt: weiche Glocke (pentatonisch) ----------
-  chime(step = Math.floor(Math.random() * 10)) {
+  chime(pos, step = Math.floor(Math.random() * 10)) {
     const ctx = this.ctx, now = ctx.currentTime;
     const semis = PENTA[step % 5] + 12 * (1 + Math.floor(step / 5));
     const f = ROOT * Math.pow(2, semis / 12);
     const out = this.g(0);
-    out.connect(this.master);
-    out.connect(this.reverb);
+    const pan = this._panner(pos, 1.2);
+    out.connect(pan).connect(this.master);
+    out.connect(this.g(0.6)).connect(this.reverb);
     out.gain.setValueAtTime(0, now);
     out.gain.linearRampToValueAtTime(0.22 * this.volumes.sfx, now + 0.01);
     out.gain.exponentialRampToValueAtTime(0.0005, now + 3.2);
@@ -98,6 +116,22 @@ export class FlowAudio {
       o.connect(og).connect(out);
       o.start(now); o.stop(now + 3.3);
     }
+  }
+
+  // ---------- Landung nach Sprung/Schweben: weicher, tiefer Aufprall im Raum ----------
+  thud(pos, strength) {
+    const ctx = this.ctx, now = ctx.currentTime;
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(120, now);
+    o.frequency.exponentialRampToValueAtTime(45, now + 0.25);
+    const g = this.g(0);
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(Math.min(strength, 1) * 0.35 * this.volumes.sfx, now + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0005, now + 0.4);
+    const pan = this._panner(pos, 1.0);
+    o.connect(g).connect(pan).connect(this.master);
+    o.start(now); o.stop(now + 0.45);
   }
 
   // ---------- Schnurren einer Begleitkugel, binaural im Raum (HRTF) ----------

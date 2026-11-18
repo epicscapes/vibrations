@@ -1,4 +1,6 @@
-// Shader für die Experience „Flow Drift“
+// Shader für die Experience „Flow Drift“ – Look nach der Unreal-Referenz:
+// sehr dunkel, Magenta/Violett, Aurora-Schleier am Himmel, Bodennebel ohne sichtbaren Horizont,
+// fast schwarzer, leicht glänzender Boden, gläserne Kugel mit Innenlicht.
 import { COLOR_GLSL } from './shaders.js';
 
 // Gelände von Level 1 „Rolling Hills“: sanfte, überlagerte Sinus-Hügel.
@@ -17,13 +19,33 @@ vec3 terrainN(vec2 p) {
   return normalize(vec3(-hx, 2.0 * e, -hz));
 }`;
 
-// Grundfarbe aller Leuchteffekte (warm wie die Sonne); wird per Hue-Shift nach Stimmfrequenz gedreht
+// Grundfarben (werden per Hue-Shift nach Stimmfrequenz gedreht)
 const BASE_GLSL = `
-const vec3 GLOW = vec3(1.0, 0.5, 0.18);
-const vec3 SKY_LOW = vec3(0.16, 0.05, 0.05);
+const vec3 GLOW     = vec3(0.95, 0.28, 0.75);  // Licht der Kugeln, Funken, Ringe (Magenta)
+const vec3 AUR_LOW  = vec3(0.55, 0.04, 0.42);  // Aurora unten (Magenta)
+const vec3 AUR_HIGH = vec3(0.22, 0.08, 0.62);  // Aurora oben (Violett/Indigo)
+const vec3 FOG      = vec3(0.065, 0.016, 0.07);// Szenen-/Bodennebel
 `;
 
-// ---------- Himmel: Verlauf + feine Sterne (Vollbild, aus der inversen Kamera berechnet) ----------
+// Aurora + Nebel: von Himmel, Boden (Fake-Spiegelung) und Kugeln gemeinsam genutzt
+const SKY_GLSL = `
+uniform float uTime;
+vec3 skyColor(vec3 dir, float hue) {
+  float up = dir.y;
+  float az = atan(dir.x, dir.z);
+  // schräge, langsam wandernde Schleier
+  float s = az * 3.0 + up * 2.2;
+  float curtain = 0.55 + 0.45 * sin(s * 2.0 + uTime * 0.05 + sin(az * 5.0 + uTime * 0.03) * 1.5);
+  curtain *= 0.6 + 0.4 * sin(s * 7.0 - uTime * 0.08 + sin(az * 11.0) * 2.0);
+  curtain = pow(max(curtain, 0.0), 1.4);
+  float band = smoothstep(-0.02, 0.25, up) * (1.0 - smoothstep(0.55, 1.0, up) * 0.6);
+  vec3 aur = mix(hueShift(AUR_LOW, hue), hueShift(AUR_HIGH, hue), smoothstep(0.1, 0.8, up));
+  vec3 col = hueShift(FOG, hue) + aur * curtain * band * 0.95;
+  // zum Horizont in den Nebel übergehen -> kein sichtbarer Horizont
+  return mix(hueShift(FOG, hue), col, smoothstep(0.0, 0.18, up));
+}`;
+
+// ---------- Himmel ----------
 export const skyVS = `#version 300 es
 in vec2 aPos;
 out vec2 vNdc;
@@ -38,26 +60,21 @@ in vec2 vNdc;
 out vec4 o;
 ${COLOR_GLSL}
 ${BASE_GLSL}
-float hash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+${SKY_GLSL}
 void main() {
   vec4 w = uInvVP * vec4(vNdc, 1.0, 1.0);
   vec3 dir = normalize(w.xyz / w.w - uCam);
-  float up = dir.y;
-  vec3 low = hueShift(SKY_LOW, uHue);
-  vec3 col = mix(low, vec3(0.008, 0.006, 0.02), smoothstep(-0.02, 0.45, up));
-  col += hueShift(GLOW, uHue) * 0.12 * exp(-abs(up) * 18.0);          // schmaler Horizont-Schimmer
-  vec3 cell = floor(dir * 260.0);
-  float s = hash(cell);
-  col += step(0.9975, s) * smoothstep(0.02, 0.2, up) * 0.6;          // Sterne
-  o = vec4(col, 1.0);
+  o = vec4(skyColor(dir, uHue), 1.0);
 }`;
 
-// ---------- Gelände mit Fresnel ----------
+// ---------- Gelände: dunkel, leicht glänzend, Innenlichter der Kugeln, Höhennebel ----------
+export const MAX_LIGHTS = 9;
+
 export const terrainVS = `#version 300 es
-in vec2 aPos;               // 0..1 Gitter
+in vec2 aPos;
 uniform mat4 uProj;
 uniform mat4 uView;
-uniform vec2 uOrigin;       // Gittermitte (auf Zellen gerastet, damit nichts "schwimmt")
+uniform vec2 uOrigin;
 uniform float uSize;
 out vec3 vWorld;
 ${TERRAIN_GLSL}
@@ -70,37 +87,59 @@ void main() {
 export const terrainFS = `#version 300 es
 precision highp float;
 uniform vec3 uCam;
-uniform vec3 uBall;
 uniform float uHue;
-uniform float uGlowAmt;     // Leuchten unter der Kugel (stärker beim Antrieb)
+uniform int uLightCount;
+uniform vec3 uLightPos[${MAX_LIGHTS}];
+uniform vec3 uLightCol[${MAX_LIGHTS}];   // Farbe × Stärke
+uniform float uFogDensity;
 in vec3 vWorld;
 out vec4 o;
 ${COLOR_GLSL}
 ${BASE_GLSL}
 ${TERRAIN_GLSL}
+${SKY_GLSL}
+
+// weiche Marmorierung (wie die Bodentextur der Referenz)
+float marble(vec2 p) {
+  float n = sin(p.x * 0.9 + sin(p.y * 0.7) * 2.0) * 0.5 + sin(p.y * 1.3 + sin(p.x * 1.1) * 1.6) * 0.35
+          + sin((p.x + p.y) * 2.7 + sin(p.x * 0.5) * 3.0) * 0.15;
+  return 0.5 + 0.5 * n;
+}
+
 void main() {
   vec3 n = terrainN(vWorld.xz);
   vec3 v = normalize(uCam - vWorld);
   float fres = pow(1.0 - max(dot(n, v), 0.0), 3.0);
-  vec3 glow = hueShift(GLOW, uHue);
-  vec3 col = vec3(0.018, 0.012, 0.03);
-  col += glow * fres * 0.9;
-  // sehr feine Höhenlinien
-  float c = abs(fract(vWorld.y * 2.5) - 0.5);
-  col += glow * smoothstep(0.03, 0.0, c) * 0.05;
-  // Lichtpfütze unter der Kugel
-  vec2 d = vWorld.xz - uBall.xz;
-  col += glow * exp(-dot(d, d) * 1.4) * (0.12 + 0.35 * uGlowAmt);
-  // Nebel zum Horizont
+  float m = marble(vWorld.xz);
+  vec3 col = vec3(0.006, 0.003, 0.01) * (0.6 + 0.8 * m);
+  // Fake-Spiegelung des Himmels (Glanz an flachen Blickwinkeln)
+  vec3 r = reflect(-v, n);
+  col += skyColor(r, uHue) * (0.08 + fres * 0.9);
+
+  // Innenlichter der Kugeln: diffuses Kontaktlicht + glänzender Lichtstreif zur Kamera (Fake-Spiegelung)
+  for (int i = 0; i < ${MAX_LIGHTS}; i++) {
+    if (i >= uLightCount) break;
+    vec3 L = uLightPos[i] - vWorld;
+    float d2 = dot(L, L);
+    vec3 l = L * inversesqrt(d2);
+    float diff = max(dot(n, l), 0.0) / (1.0 + d2 * 1.2);
+    float spec = pow(max(dot(r, l), 0.0), 24.0) / (1.0 + d2 * 0.25);
+    col += uLightCol[i] * (diff * 0.9 + spec * 0.55 * (0.5 + m));
+  }
+
+  // Höhennebel: am Boden am dichtesten, in der Szenenfarbe
   float dist = length(uCam - vWorld);
-  float f = exp(-dist * 0.03);
-  col = mix(hueShift(SKY_LOW, uHue) * 0.8, col, f);
+  float hFactor = exp(-max(vWorld.y + 1.5, 0.0) * 0.45);
+  float fog = 1.0 - exp(-dist * uFogDensity * (0.6 + 1.4 * hFactor));
+  col = mix(col, hueShift(FOG, uHue), clamp(fog, 0.0, 1.0));
+  // ganz außen vollständig im Nebel (kein Rand des Geländes sichtbar)
+  col = mix(col, hueShift(FOG, uHue), smoothstep(36.0, 52.0, dist));
   o = vec4(col, 1.0);
 }`;
 
-// ---------- Kugel: Fresnel + sanft durchscheinende Julia-Muster (drehen sich mit) ----------
+// ---------- Kugeln: gläsern, dunkle Wirbel (Julia), Innenlicht, dezenter Rand ----------
 export const ballVS = `#version 300 es
-in vec2 aPos;               // (Längengrad, Breitengrad) 0..1
+in vec2 aPos;
 uniform mat4 uProj;
 uniform mat4 uView;
 uniform vec3 uPos;
@@ -122,45 +161,47 @@ export const ballFS = `#version 300 es
 precision highp float;
 uniform vec3 uCam;
 uniform float uHue;
-uniform float uTime;
-uniform float uDrive;
+uniform float uLight;      // Stärke des Innenlichts
+uniform float uSwirl;      // Sichtbarkeit der Wirbel
 in vec3 vObj;
 in vec3 vN;
 in vec3 vWorld;
 out vec4 o;
 ${COLOR_GLSL}
 ${BASE_GLSL}
+${SKY_GLSL}
 vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 float julia(vec2 z, vec2 c) {
-  for (int i = 0; i < 28; i++) {
+  for (int i = 0; i < 24; i++) {
     z = cmul(z, z) + c;
     float m = dot(z, z);
-    if (m > 64.0) return (float(i) + 1.0 - log2(log2(m) * 0.5)) / 28.0;
+    if (m > 64.0) return (float(i) + 1.0 - log2(log2(m) * 0.5)) / 24.0;
   }
   return 1.0;
 }
 void main() {
   vec3 n = normalize(vN);
   vec3 v = normalize(uCam - vWorld);
-  float fres = pow(1.0 - max(dot(n, v), 0.0), 2.2);
+  float nv = max(dot(n, v), 0.0);
+  float fres = pow(1.0 - nv, 3.0);
   vec3 glow = hueShift(GLOW, uHue);
-  // Stereografische Projektion je Halbkugel -> Julia-Muster auf der Oberfläche
   vec3 q = normalize(vObj);
-  vec2 z = q.xz / (1.0 + abs(q.y)) * 1.7;
+  vec2 z = q.xz / (1.0 + abs(q.y)) * 1.6;
   float a = 3.1 + 1.4 * sin(uTime * 0.07);
   float t = julia(z, 0.7885 * vec2(cos(a), sin(a)));
-  float pat = smoothstep(0.12, 0.7, t);
-  vec3 col = vec3(0.03, 0.02, 0.05);
-  col += glow * pat * (0.5 + 0.4 * uDrive) * (1.0 - fres * 0.5);
-  col += glow * fres * 1.3;
-  // weicher Glanzpunkt
-  vec3 l = normalize(vec3(-0.4, 0.8, 0.3));
-  col += vec3(1.0, 0.9, 0.8) * pow(max(dot(reflect(-v, n), l), 0.0), 40.0) * 0.35;
-  o = vec4(col, 1.0);
+  float swirl = smoothstep(0.15, 0.75, t);
+  // Glas: Innenlicht scheint durch die Mitte, Wirbel liegen darüber
+  vec3 inner = glow * uLight * pow(nv, 2.5);
+  vec3 col = inner * (0.55 + 0.45 * swirl) + glow * swirl * uSwirl * 0.18;
+  col += skyColor(reflect(-v, n), uHue) * fres * 0.9;          // Spiegelung von Aurora/Nebel am Rand
+  col += glow * fres * 0.12;
+  vec3 l = normalize(vec3(-0.3, 0.9, 0.2));
+  col += vec3(1.0, 0.85, 0.95) * pow(max(dot(reflect(-v, n), l), 0.0), 60.0) * 0.25;
+  float alpha = clamp(0.55 + fres * 0.45 + uLight * 0.2, 0.0, 1.0);   // gläsern, Rand deckender
+  o = vec4(col, alpha);
 }`;
 
-// ---------- Funken: schimmernder Pfad und Explosionen der Goals ----------
-// Attribute: aPos (Position), aData = (Geburtszeit, Lebensdauer, Farbton, Saat)
+// ---------- Funken: schimmernder Pfad und Explosionen ----------
 export const sparkVS = `#version 300 es
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec4 aData;
@@ -169,7 +210,8 @@ uniform mat4 uView;
 uniform float uTime;
 uniform float uSize;
 uniform float uPxScale;
-uniform float uRise;        // langsames Aufsteigen (m/s)
+uniform float uRise;
+uniform float uBright;
 out float vA;
 out vec3 vCol;
 ${COLOR_GLSL}
@@ -182,9 +224,9 @@ void main() {
   vec4 vp = uView * vec4(p, 1.0);
   gl_Position = uProj * vp;
   gl_PointSize = clamp(uSize * (0.6 + 0.8 * seed) * uPxScale / max(-vp.z, 0.05), 1.0, 24.0);
-  float tw = 0.55 + 0.45 * sin(uTime * (2.0 + seed * 6.0) + seed * 40.0);   // Schimmern
-  vA = pow(1.0 - age, 1.5) * smoothstep(0.0, 0.03, age) * tw;
-  vCol = hueShift(mix(GLOW, vec3(1.0, 0.85, 0.6), seed * 0.5), aData.z);
+  float tw = 0.5 + 0.5 * sin(uTime * (2.0 + seed * 6.0) + seed * 40.0);
+  vA = pow(1.0 - age, 1.5) * smoothstep(0.0, 0.03, age) * tw * uBright;
+  vCol = hueShift(mix(GLOW, vec3(1.0, 0.8, 0.95), seed * 0.4), aData.z);
 }`;
 
 export const sparkFS = `#version 300 es
@@ -194,17 +236,16 @@ in vec3 vCol;
 out vec4 o;
 void main() {
   float r = length(gl_PointCoord * 2.0 - 1.0);
-  float m = exp(-r * r * 5.0);
-  o = vec4(vCol * vA * m, 1.0);
+  o = vec4(vCol * vA * exp(-r * r * 5.0), 1.0);
 }`;
 
-// ---------- Warp-Ringe: konzentrische Ringe, die beim Antrieb nach hinten wegstrahlen ----------
+// ---------- Warp-Ringe: dünn, dezent, wie ein Tunnel hinter der Kugel ----------
 export const ringVS = `#version 300 es
 uniform mat4 uProj;
 uniform mat4 uView;
 uniform vec3 uCenter;
-uniform vec3 uU;            // Achse 1 × Radius
-uniform vec3 uV;            // Achse 2 × Radius
+uniform vec3 uU;
+uniform vec3 uV;
 out vec2 vUv;
 void main() {
   int c = gl_VertexID;
@@ -221,37 +262,30 @@ in vec2 vUv;
 out vec4 o;
 void main() {
   float d = length(vUv);
-  float a = exp(-pow((d - 0.9) / 0.035, 2.0)) + 0.35 * exp(-pow((d - 0.88) / 0.12, 2.0));
+  float a = exp(-pow((d - 0.92) / 0.018, 2.0)) + 0.25 * exp(-pow((d - 0.9) / 0.07, 2.0));
   o = vec4(uColor * a * uAlpha, 1.0);
 }`;
 
-// ---------- Ribbon-Schweif: Band entlang der letzten Positionen, zur Kamera gedreht ----------
+// ---------- Ribbon-Schweif ----------
 export const ribbonVS = `#version 300 es
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aData;     // (Deckkraft, Seite -1..1)
+layout(location = 1) in vec2 aData;
 uniform mat4 uProj;
 uniform mat4 uView;
 out vec2 vData;
-void main() {
-  vData = aData;
-  gl_Position = uProj * uView * vec4(aPos, 1.0);
-}`;
+void main() { vData = aData; gl_Position = uProj * uView * vec4(aPos, 1.0); }`;
 
 export const ribbonFS = `#version 300 es
 precision mediump float;
 uniform vec3 uColor;
 in vec2 vData;
 out vec4 o;
-void main() {
-  float a = vData.x * (1.0 - vData.y * vData.y);
-  o = vec4(uColor * a, 1.0);
-}`;
+void main() { o = vec4(uColor * vData.x * (1.0 - vData.y * vData.y), 1.0); }`;
 
-// ---------- Leuchtkugeln: Goals und Begleiter (Punkt-Sprites mit Kern und Halo) ----------
-// aData = (Größe in m, Farbton, Helligkeit, Halo-Anteil)
+// ---------- Leucht-Sprites: Goals und Halos der Kugeln ----------
 export const glowVS = `#version 300 es
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec4 aData;
+layout(location = 1) in vec4 aData;     // (Größe m, Farbton, Helligkeit, Halo-Anteil)
 uniform mat4 uProj;
 uniform mat4 uView;
 uniform float uPxScale;
@@ -263,7 +297,7 @@ void main() {
   vec4 vp = uView * vec4(aPos, 1.0);
   gl_Position = uProj * vp;
   gl_PointSize = clamp(aData.x * uPxScale / max(-vp.z, 0.05), 2.0, 512.0);
-  vCol = hueShift(mix(GLOW, vec3(1.0, 0.9, 0.7), 0.35), aData.y) * aData.z;
+  vCol = hueShift(mix(GLOW, vec3(1.0, 0.85, 1.0), 0.3), aData.y) * aData.z;
   vHalo = aData.w;
 }`;
 
@@ -276,5 +310,55 @@ void main() {
   float r = length(gl_PointCoord * 2.0 - 1.0);
   float core = exp(-r * r * 40.0);
   float halo = exp(-r * r * 5.0) * vHalo;
-  o = vec4(vCol * (core * 1.5 + halo) * (1.0 - smoothstep(0.9, 1.0, r)), 1.0);
+  o = vec4(vCol * (core * 1.4 + halo) * (1.0 - smoothstep(0.9, 1.0, r)), 1.0);
+}`;
+
+// ---------- Flügel: zwei Fächer aus leuchtenden Federn, schlagen sanft ----------
+export const WING_FEATHERS = 9;
+export const wingVS = `#version 300 es
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform vec3 uPos;          // Kugelmitte
+uniform vec3 uFwd;          // Flugrichtung (horizontal)
+uniform float uOpen;        // 0 = eingeklappt, 1 = offen
+uniform float uFlap;        // Flügelschlag-Phase
+uniform float uSpan;        // Spannweite je Flügel (m)
+uniform float uRootR;       // Abstand der Flügelwurzel von der Mitte (m)
+out vec2 vUv;
+out float vK;
+const int F = ${WING_FEATHERS};
+void main() {
+  int id = gl_VertexID;
+  int quad = id / 6;                  // Feder-Index über beide Flügel
+  int c = id - quad * 6;
+  float side = quad < F ? -1.0 : 1.0;
+  int k = quad < F ? quad : quad - F;
+  float fk = float(k) / float(F - 1);
+  vec2 q = vec2((c == 1 || c == 2 || c == 4) ? 1.0 : 0.0, (c == 2 || c == 4 || c == 5) ? 1.0 : -1.0);
+  vec3 up = vec3(0.0, 1.0, 0.0);
+  vec3 right = normalize(cross(uFwd, up));
+  // Federn fächern von vorne-oben nach hinten aus, Schlag läuft von innen nach außen
+  float spread = mix(0.55, -0.35, fk);
+  float flap = sin(uFlap - fk * 0.6) * 0.35 * uOpen;
+  vec3 dir = normalize(right * side * cos(spread) + up * (sin(spread) * 0.5 + flap) - uFwd * fk * 0.6);
+  float len = uSpan * uOpen * mix(1.0, 0.55, fk);
+  vec3 width = normalize(cross(dir, up)) * 0.1 * uOpen * (1.0 - q.x * 0.6);
+  vec3 root = uPos + right * side * uRootR + up * 0.05;
+  vec3 w = root + dir * len * q.x + width * q.y;
+  vUv = q;
+  vK = fk;
+  gl_Position = uProj * uView * vec4(w, 1.0);
+}`;
+
+export const wingFS = `#version 300 es
+precision highp float;
+uniform vec3 uColor;
+uniform float uOpen;
+in vec2 vUv;
+in float vK;
+out vec4 o;
+void main() {
+  float edge = 1.0 - vUv.y * vUv.y;
+  float a = edge * (0.35 + 0.65 * vUv.x) * (1.0 - vUv.x * 0.5) * uOpen * (0.6 + 0.4 * (1.0 - vK));
+  o = vec4(uColor * a * 0.8, 1.0);
 }`;
