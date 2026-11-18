@@ -5,6 +5,7 @@ import {
   ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS, wingVS, wingFS, WING_FEATHERS, MAX_LIGHTS, compFS, shaftVS, shaftFS, moteVS, moteFS,
 } from './flowshaders.js';
 import { Bloom } from './flowpost.js';
+import { Profiler } from './flowprof.js';
 import { FlowAudio } from './flowsound.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 import { VRMenu } from './vrmenu.js';
@@ -152,6 +153,8 @@ const P = {
   shaft: program(shaftVS, shaftFS), mote: program(moteVS, moteFS),
 };
 const emptyVao = gl.createVertexArray();
+const prof = params.get('profile') ? new Profiler(gl) : null;   // ?profile=1: Zeiten je Abschnitt
+const mark = prof ? (n) => prof.mark(n) : () => {};
 
 function gridMesh(n, m) {
   const pts = new Float32Array((n + 1) * (m + 1) * 2);
@@ -349,10 +352,14 @@ function update(dt) {
   emitTrail(dist * grounded);
   updateRings(dt);
   updateHistory();
+  let t0 = prof ? performance.now() : 0;
+  const lap = (n) => { if (prof) { const t = performance.now(); prof.cpuTime(n, t - t0); t0 = t; } };
   updateGoals(dt);
+  lap('goals+companions');
   updateBursts(dt);
   updateChips(dt);
   emitMotes(dt);
+  lap('particles');
 
   if (sound) {
     sound.resume();
@@ -360,6 +367,7 @@ function update(dt) {
     sound.wings(wing, ball.pos);
     sound.music(speed);
   }
+  lap('sound');
   if (fx) fx.update(hum.level, hum.pitch, hum.rms);
   return speed;
 }
@@ -744,6 +752,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   const pxScale = proj[5] * vpH * 0.5;
 
   // Himmel: Aurora + Nebel (ohne Tiefe)
+  mark('sky');
   gl.disable(gl.DEPTH_TEST);
   gl.depthMask(false);
   gl.useProgram(P.sky.p);
@@ -756,6 +765,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
   // Gelände (mit Tiefe)
+  mark('terrain');
   gl.enable(gl.DEPTH_TEST);
   gl.depthMask(true);
   const cell = TERRAIN_SIZE / TERRAIN_N;
@@ -779,6 +789,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.drawElements(gl.TRIANGLES, terrainMesh.count, gl.UNSIGNED_INT, 0);
 
   // Begleiter: leuchtende Kugeln (deckend)
+  mark('companions');
   gl.bindVertexArray(sphereMesh.vao);
   if (companions.length) {
     u = P.comp.u;
@@ -793,6 +804,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     }
   }
   // Hauptkugel: Glasmurmel (im Shader verfolgt, deckend -> keine Sortierprobleme)
+  mark('ball');
   u = P.ball.u;
   gl.useProgram(P.ball.p);
   gl.uniformMatrix4fv(u.uProj, false, proj);
@@ -819,6 +831,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.blendFunc(gl.ONE, gl.ONE);
 
   // Atmosphärische Lichtstrahlen: zur Kamera gedrehte, schräge Bänder, unten zum Boden und zur Kamera hin ausgeblendet
+  mark('shafts');
   if (S.fdShafts > 0) {
     u = P.shaft.u;
     gl.useProgram(P.shaft.p);
@@ -838,6 +851,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   }
 
   // Pfad + Explosionen
+  mark('sparks');
   u = P.spark.u;
   gl.useProgram(P.spark.p);
   gl.uniformMatrix4fv(u.uProj, false, proj);
@@ -877,6 +891,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   }
 
   // Magische Umgebungspartikel: steigen in Kameranähe vom Boden auf (weltfest -> zeigen das Tempo)
+  mark('motes');
   if (S.fdMotes > 0) {
     u = P.mote.u;
     gl.useProgram(P.mote.p);
@@ -894,6 +909,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   }
 
   // Goals
+  mark('goals');
   if (glowCount) {
     u = P.glow.u;
     gl.useProgram(P.glow.p);
@@ -908,6 +924,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   }
 
   // Ribbon
+  mark('ribbon');
   if (ribbonCount) {
     u = P.ribbon.u;
     gl.useProgram(P.ribbon.p);
@@ -920,6 +937,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   }
 
   // Warp-Ringe: dünn und dezent, wie ein Tunnel hinter der Kugel
+  mark('rings');
   if (rings.length && S.fdRings > 0) {
     u = P.ring.u;
     gl.useProgram(P.ring.p);
@@ -943,6 +961,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   }
 
   // Flügel (beim Ausbreiten der Arme)
+  mark('wings');
   if (wing > 0.02) {
     u = P.wing.u;
     gl.useProgram(P.wing.p);
@@ -962,6 +981,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   }
   gl.disable(gl.BLEND);
   gl.depthMask(true);
+  mark(null);
 }
 
 // ---------- 2D-Vorschau (Portal) ----------
@@ -987,14 +1007,18 @@ function previewFrame(t) {
   headFwd = [-Math.sin(yaw), -Math.cos(yaw)];
   jumpPressed = keys.has(' ');
   wingGoal = keys.has('f') ? 1 : 0;
+  let c0 = performance.now();
   update(dt);
   updateRig(dt);
+  if (prof) prof.cpuTime('update', performance.now() - c0);
   // Blick leicht nach unten auf die Kugel (POV: steiler)
   const pitch = 0.95 - 0.6 * S.fdCam;
   const camM = mul(rigMatrix(), rotationX(-pitch));
   const view = invert(camM);
   const cam = [camM[12], camM[13], camM[14]];
+  c0 = performance.now();
   prepareFrame(cam);
+  if (prof) prof.cpuTime('upload', performance.now() - c0);
   if (sound) sound.listener(cam, transformDir(camM, [0, 0, -1]), transformDir(camM, [0, 1, 0]));
 
   if (S.fdBloom) bloom.begin(w, h); else gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1002,7 +1026,8 @@ function previewFrame(t) {
   gl.clearColor(0, 0, 0, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   drawWorld(perspective(parseFloat(params.get('fov') || '1.1'), w / h, 0.05, 200), view, cam, w, h);
-  if (S.fdBloom) bloom.finish(null, [[0, 0, w, h]], S.fdBloomStr, S.fdBloomSoft);
+  if (S.fdBloom) { mark('bloom'); bloom.finish(null, [[0, 0, w, h]], S.fdBloomStr, S.fdBloomSoft); mark(null); }
+  if (prof) { prof.frame(); ui.status.textContent = prof.report; }
   requestAnimationFrame(previewFrame);
 }
 ui.preview.addEventListener('click', () => setPreview(!previewOn));
@@ -1116,7 +1141,7 @@ SECTIONS.forEach((sec, i) => {
 ui.toggle.addEventListener('click', () => ui.panel.classList.toggle('hidden'));
 
 // Für automatische Tests: ?debug=1 macht den Zustand von außen erreichbar
-if (params.get('debug')) window.__fd = { ball, goals, companions, chipList, get time() { return time; }, get sound() { return sound; } };
+if (params.get('debug')) window.__fd = { get prof() { return prof && prof.last; }, ball, goals, companions, chipList, get time() { return time; }, get sound() { return sound; } };
 
 const bloom = new Bloom(gl, program, fullscreen);
 
@@ -1218,13 +1243,17 @@ function xrFrame(t, frame) {
   const l = Math.hypot(fw[0], fw[2]);
   if (l > 0.2) headFwd = [fw[0] / l, fw[2] / l];
 
+  let c0 = performance.now();
   update(dt);
   updateRig(dt);
+  if (prof) prof.cpuTime('update', performance.now() - c0);
   const rig = rigMatrix();
   const invRig = invert(rig);
   const camW = (p) => [rig[0] * p.x + rig[4] * p.y + rig[8] * p.z + rig[12], rig[1] * p.x + rig[5] * p.y + rig[9] * p.z + rig[13], rig[2] * p.x + rig[6] * p.y + rig[10] * p.z + rig[14]];
   const headPos = camW(hp);
+  c0 = performance.now();
   prepareFrame(headPos);
+  if (prof) prof.cpuTime('upload', performance.now() - c0);
   if (sound) sound.listener(headPos, transformDir(rig, fl), transformDir(rig, upOf(ho)));
 
   const layer = session.renderState.baseLayer;
@@ -1241,12 +1270,15 @@ function xrFrame(t, frame) {
     drawWorld(view.projectionMatrix, mul(view.transform.inverse.matrix, invRig), camW(view.transform.position), vp.width, vp.height);
   }
   // Bloom auf die Szene, danach das Menü (bleibt scharf)
-  if (useBloom) bloom.finish(layer.framebuffer, vps, S.fdBloomStr, S.fdBloomSoft);
+  if (useBloom) { mark('bloom'); bloom.finish(layer.framebuffer, vps, S.fdBloomStr, S.fdBloomSoft); mark(null); }
+  mark('menu');
   pose.views.forEach((view, i) => {
     gl.viewport(...vps[i]);
     gl.disable(gl.DEPTH_TEST);
     vrMenu.draw(view.projectionMatrix, view.transform.inverse.matrix, vps[i][2], vps[i][3]);
   });
+  mark(null);
+  if (prof) { prof.frame(); ui.status.textContent = prof.report; }
 }
 
 initXR();

@@ -140,6 +140,11 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Positionen der Schnurr-Quellen werden nur ~25×/s nachgeführt (weniger Automations-Ereignisse). Musik generativ, nicht räumlich, lauter mit Tempo.
 - Depth-Buffer an (XR-Layer `depth: true`), Reihenfolge: Himmel → Gelände → Kugeln (deckend) → additive Effekte.
 - Tests: `?debug=1` legt den Zustand als `window.__fd` offen.
+- Profiling: `?profile=1` misst jeden Render-Abschnitt (sky, terrain, companions, ball, shafts, sparks, motes, goals, ribbon, rings, wings, bloom, menu)
+  und die CPU-Teile (update, goals+companions, particles, sound, upload); Mittel über 120 Frames in der Statuszeile und als `PROFILE`-Konsolenzeile
+  (`flowprof.js`). GPU über `EXT_disjoint_timer_query_webgl2`, falls vorhanden, sonst (oder mit `?profile=finish`) synchron per 1-Pixel-readPixels.
+  Headless-Messung (SwiftShader, v0.20): Gelände-Fragment-Shader ≈ 70 % (Licht-Schleife, Himmels-Spiegelung, Normale), in POV die Murmel ≈ 40 %,
+  Himmel ≈ 10 %, Bloom ≈ 10 %, CPU < 1 ms/Frame. SwiftShader führt Verzweigungen meist voll aus → Quest-Werte mit `?profile=1` gegenprüfen.
 
 ## Gemeinsam: Display
 - Untermenü „Display“ in jeder Experience: Supersampling 100–300 % (Standard 150 %). Wird NICHT gespeichert – jede Experience/jedes Laden startet mit 150 %
