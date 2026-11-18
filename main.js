@@ -2,12 +2,12 @@
 import {
   simVS, simFS, sceneVS, sceneFS, partVS, partFS, fadeFS,
   flyVS, flyFS, tailVS, tailFS, TAIL_SEGMENTS, fracFS,
-  sandUpdateFS, sandVS, sandFS, meshVS, meshFS,
+  sandUpdateFS, sandVS, sandFS,
 } from './shaders.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.11.0';
+const VERSION = 'v0.12.0';
 
 // ---------- Feste Szenenwerte ----------
 const params = new URLSearchParams(location.search);
@@ -48,15 +48,11 @@ const SECTIONS = [
     fracIter:  { label: 'Detail (Iterationen)', min: 4, max: 96, step: 2, def: 48 },
     fracRes:   { label: 'Fraktal-Auflösung', options: [[512, '512'], [768, '768'], [1024, '1024'], [1536, '1536'], [2048, '2048 (schwer)'], [3072, '3072 (sehr schwer)']], def: 768 },
     fracCount: { label: 'Anzahl Ebenen', min: 1, max: 6, step: 1, def: 3 },
+    fracFocus: { label: 'Stärkste Ebene', options: [[0, 'Vorderste'], [1, 'Mittlere']], def: 0 },
     fracBlend: { label: 'Ebenen-Mischmodus', options: [[0, 'Normal'], [1, 'Additiv'], [2, 'Screen'], [3, 'Difference'], [4, 'Aufhellen']], def: 0 },
     echoFade:  { label: 'Echo-Deckkraft', min: 0.1, max: 1, step: 0.05, def: 0.55 },
     echoSat:   { label: 'Echo-Sättigung (+ pro Abstand)', min: 0, max: 1, step: 0.05, def: 0.35 },
-    echoHue:   { label: 'Echo-Farbversatz (vorne/hinten gegenläufig)', min: -1, max: 1, step: 0.05, def: 0.2 },
-    reliefMode:  { label: 'Relief', options: [[0, 'Aus'], [1, 'Shader (Parallax)'], [2, 'Mesh (Displacement)']], def: 0 },
-    relief:      { label: 'Relief-Tiefe (m)', min: 0, max: 1.5, step: 0.05, def: 0.5 },
-    reliefBlur:  { label: 'Relief-Weichheit', min: 0, max: 6, step: 0.25, def: 2.5 },
-    reliefSteps: { label: 'Shader: Qualität (Schritte)', min: 6, max: 48, step: 2, def: 16 },
-    meshPolys:   { label: 'Mesh: Polygone', min: 200, max: 20000, step: 200, def: 1000 },
+    echoHue:   { label: 'Echo-Farbversatz (pro Abstand)', min: -1, max: 1, step: 0.05, def: 0.2 },
     fracInner: { label: 'Helle Innenflächen', options: [[2, 'Struktur'], [1, 'Hohl'], [0, 'Hell']], def: 2 },
     hueShift:  { label: 'Hue-Shift nach Tonhöhe', min: 0, max: 1, step: 0.05, def: 1 },
   }},
@@ -86,13 +82,16 @@ const SECTIONS = [
     waveFreq:   { label: 'Wellen-Frequenz', min: 0.5, max: 3, step: 0.1, def: 1.3 },
     waveSpeed:  { label: 'Ausbreitungs-Tempo', min: 0.3, max: 4, step: 0.1, def: 1 },
     waveDecay:  { label: 'Abklingzeit (s)', min: 0.1, max: 12, step: 0.1, def: 2 },
-    ior:        { label: 'Brechung (IOR)', min: 1, max: 2.2, step: 0.01, def: 1.33 },
+    ior:        { label: 'Brechung (IOR)', min: 0.5, max: 2.2, step: 0.01, def: 1.33 },
+    edgeSoft:   { label: 'Rand-Ausblendung (nur optisch)', min: 0, max: 0.6, step: 0.02, def: 0.25 },
     glow:       { label: 'Leuchtende Wellen', min: 0, max: 1.5, step: 0.05, def: 0 },
     sand:       { label: 'Sand-Muster', toggle: true, def: false },
     sandCount:  { label: 'Sand: Anzahl', min: 2000, max: 80000, step: 2000, def: 24000 },
     sandSize:   { label: 'Sand: Korngröße', min: 0.004, max: 0.04, step: 0.002, def: 0.012 },
     sandFade:   { label: 'Sand: Nachleuchten (s)', min: 0.5, max: 15, step: 0.5, def: 4 },
     sandFlow:   { label: 'Sand: Sammeln in Knotenlinien', min: 0.002, max: 0.05, step: 0.002, def: 0.012 },
+    sandPos:    { label: 'Sand: Abstand vor dem Wasser (m)', min: 0, max: 4.6, step: 0.05, def: 0 },
+    sandSpread: { label: 'Sand: Tiefen-Streuung (m)', min: 0, max: 3, step: 0.05, def: 0 },
     simRes:     { label: 'Auflösung', options: [[512, '512'], [768, '768'], [1024, '1024'], [1536, '1536 (schwer)']], def: 768 },
     follow:     { label: 'Zentrum folgt Blick', toggle: true, def: false },
     followSpeed:{ label: 'Folge-Tempo', min: 0.05, max: 2, step: 0.05, def: 0.4 },
@@ -162,7 +161,6 @@ const tailProg = program(tailVS, tailFS);
 const fracProg = program(simVS, fracFS);
 const sandUpdProg = program(simVS, sandUpdateFS);
 const sandProg = program(sandVS, sandFS);
-const meshProg = program(meshVS, meshFS);
 const emptyVao = gl.createVertexArray();
 const fullscreen = vao([-1, -1, 3, -1, -1, 3]);
 const h = SCENE.half;
@@ -207,7 +205,7 @@ const coronaLayers = [0, 1, 2].map(() => target(PART_SIZE, gl.RGBA16F, gl.RGBA))
 
 // Fraktal: drei Ebenen (aktuell + zwei zeitversetzte Echos in der Tiefe), Auflösung umschaltbar
 // Alle Ebenen liegen in einem Textur-Array; es wird nur so viel Speicher belegt, wie Ebenen eingestellt sind.
-let FRAC_SIZE = 768, fracTex = null, fracFbs = [], fracCount = 0, fracLevels = 1;
+let FRAC_SIZE = 768, fracTex = null, fracFbs = [], fracCount = 0;
 function setFracLayers(size, count) {
   if (fracTex) gl.deleteTexture(fracTex);
   for (const fb of fracFbs) gl.deleteFramebuffer(fb);
@@ -215,8 +213,7 @@ function setFracLayers(size, count) {
   fracCount = count;
   fracTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
-  fracLevels = Math.floor(Math.log2(size)) + 1;           // Mipmaps für weiches Relief
-  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, fracLevels, gl.RGBA16F, size, size, count);
+  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA16F, size, size, count);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -272,10 +269,9 @@ function rayToUV(origin, dir, max = 0.3) {
 }
 function gazeFromRay(origin, dir) { const uv = rayToUV(origin, dir); if (uv) gazeUV = uv; }
 
-// Rechter Controller: wohin der unsichtbare "Laserpointer" zeigt und wie fest der Trigger gedrückt ist
+// Controller: wohin der unsichtbare "Laserpointer" der Hand zeigt, deren Trigger am festesten gedrückt ist
 let ctrlUV = null, ctrlValue = 0;
-// Linker Controller: Trigger-Druck -> Frequenz
-let leftValue = 0;
+const TRIGGER_MAX = 1 / 3;     // voll gedrückter Trigger = 1/3 der bisherigen Wellenstärke
 
 function updateSource(dt) {
   let goal, k;
@@ -339,33 +335,6 @@ function updateSand(dt, level) {
   [sandA, sandB] = [sandB, sandA];
 }
 
-// ---------- Ton zum linken Trigger: Sinus mit Obertönen ----------
-let tone = null;
-function ensureTone() {
-  if (tone) return;
-  const ctx = hum.ctx || new AudioContext();
-  const out = ctx.createGain();
-  out.gain.value = 0;
-  out.connect(ctx.destination);
-  const oscs = [[1, 1], [2, 0.45], [3, 0.22], [4, 0.12], [5, 0.06]].map(([mul, vol]) => {
-    const o = ctx.createOscillator();
-    o.type = 'sine';
-    const g = ctx.createGain();
-    g.gain.value = vol * 0.35;
-    o.connect(g).connect(out);
-    o.start();
-    return { o, mul };
-  });
-  tone = { ctx, out, oscs };
-}
-function updateTone(active, hz, level) {
-  if (!tone) return;
-  const now = tone.ctx.currentTime;
-  if (tone.ctx.state === 'suspended') tone.ctx.resume();
-  tone.out.gain.setTargetAtTime(active ? 0.12 + 0.18 * level : 0, now, active ? 0.08 : 0.3);
-  if (active) for (const { o, mul } of tone.oscs) o.frequency.setTargetAtTime(hz * mul, now, 0.05);
-}
-
 // ---------- Sonne: wächst beim Summen, federnd nachgezogen ----------
 let sunScale = 1, sunVel = 0, sunWob = 0;
 let flow = 0, turb = 0, clock = 0, flyFlow = 0;
@@ -393,6 +362,8 @@ function sunUniforms(u) {
 
 // ---------- Fraktal ----------
 const fractalOn = () => S.centerObj === 1;
+// Index der stärksten Ebene als Mittelpunkt der Verteilung: 0 = vorderste, (n-1)/2 = mittlere
+const fracCenter = () => (S.fracFocus === 1 ? (fracCount - 1) / 2 : 0);
 
 function drawFractal() {
   gl.useProgram(fracProg.p);
@@ -404,10 +375,10 @@ function drawFractal() {
   gl.uniform1f(u.uHue, hue);
   gl.uniform1f(u.uInner, S.fracInner);
   gl.bindVertexArray(fullscreen);
-  // Ebenen symmetrisch um die innerste: k < 0 = davor, k > 0 = dahinter.
-  // Die innerste hat volle Deckkraft; nach vorne und hinten nehmen Deckkraft ab und Sättigung zu.
-  const center = (fracCount - 1) / 2;
-  const evenShift = fracCount % 2 === 0 ? 0.5 : 0;   // bei gerader Anzahl sind die zwei mittleren "innen"
+  // Ebenen um die stärkste verteilt: k < 0 = davor, k > 0 = dahinter (bei „Vorderste“ gibt es nur k ≥ 0).
+  // Die stärkste hat volle Deckkraft; mit dem Abstand nehmen Deckkraft ab und Sättigung zu.
+  const center = fracCenter();
+  const evenShift = S.fracFocus === 1 && fracCount % 2 === 0 ? 0.5 : 0;   // gerade Anzahl: zwei mittlere
   for (let i = 0; i < fracCount; i++) {
     const k = i - center;
     const dist = Math.abs(k) - evenShift;
@@ -418,7 +389,7 @@ function drawFractal() {
     gl.uniform1f(u.uScale, SCENE.fracR * 0.75 * S.fracZoom * fracBreath() * (1 + k * 0.07));
     gl.uniform1f(u.uFade, Math.pow(S.echoFade, dist));
     gl.uniform1f(u.uSat, 1 + S.echoSat * dist);
-    gl.uniform1f(u.uHueOff, S.echoHue * k);            // vorne und hinten in entgegengesetzte Richtung
+    gl.uniform1f(u.uHueOff, S.echoHue * k);            // davor / dahinter in entgegengesetzte Richtung
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 }
@@ -462,7 +433,7 @@ function drawCorona(dt, level) {
       gl.uniform1f(u.uNoise, 1 / S.coronaNoise);
       gl.uniform1f(u.uMode, fractalOn() ? 1 : 0);
       gl.uniform1f(u.uFracR, SCENE.fracR * S.fracZoom * fracBreath() * 1.3);
-      gl.uniform1f(u.uFracMain, Math.floor((fracCount - 1) / 2));
+      gl.uniform1f(u.uFracMain, Math.floor(fracCenter()));
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
       gl.uniform1i(u.uFrac, 0);
@@ -483,21 +454,15 @@ function update(t) {
   lastT = t;
 
   hum.update();
-  // Anregung: Summen, rechter Trigger (analog) oder gedrückter Zeiger in der Vorschau
+  // Anregung: Summen, Trigger (analog, beide Hände) oder gedrückter Zeiger in der Vorschau
   const goal = Math.max(hum.level, manualHum ? 0.6 : 0, ctrlValue);
   amp += (goal - amp) * 0.1;
+  const pitch = (manualHum || ctrlValue > 0.02) && hum.level < 0.05 ? 150 : hum.pitch;
 
-  // Tonhöhe: linker Trigger hat Vorrang (80–400 Hz nach Druck), sonst Summen
-  const leftActive = leftValue > 0.02;
-  const triggerHz = 80 * Math.pow(400 / 80, Math.min(leftValue, 1));
-  let pitch = hum.pitch;
-  if (leftActive) pitch = triggerHz;
-  else if ((manualHum || ctrlValue > 0.02) && hum.level < 0.05) pitch = 150;
-  if (leftActive) ensureTone();
-  updateTone(leftActive, triggerHz, amp);
-
-  // Wellen: Dynamik-Kurve -> leises Summen = kleine Wellen, lautes Summen = volle Stärke
-  const drive = S.waveGain * Math.pow(amp, S.waveDyn) * 0.02;
+  // Wellen: Dynamik-Kurve -> leises Summen = kleine Wellen, lautes Summen = volle Stärke.
+  // Kommt die Anregung vom Trigger, ist sie auf 1/3 begrenzt.
+  const triggerOnly = ctrlValue > hum.level;
+  const drive = S.waveGain * Math.pow(amp, S.waveDyn) * 0.02 * (triggerOnly ? TRIGGER_MAX : 1);
   const u = Math.min(Math.max(Math.log(pitch / 80) / Math.log(400 / 80), 0), 1);
   const lambda = Math.max(48 * Math.pow(12 / 48, u) * (SIM_SIZE / 512) / S.waveFreq, 5);
   const freq = Math.sqrt(waveK()) / lambda;            // Zyklen pro Schritt
@@ -522,46 +487,12 @@ function update(t) {
   grainT += dt * S.bgSpeed;
   updateSun(dt, amp);
   updateHue(dt, pitch, amp > 0.15);
-  if (fractalOn()) {
-    drawFractal();
-    // Relief braucht weichgezeichnete Höhen -> Mipmaps nur dann erzeugen
-    const blurOn = S.reliefMode > 0 && S.reliefBlur > 0;
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, blurOn ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
-    if (blurOn) gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
-  }
+  if (fractalOn()) drawFractal();
   drawCorona(dt, amp);
 
   if (hum.active) ui.status.textContent =
     `Mikro: ${(hum.level * 100) | 0}% · ${hum.pitch.toFixed(0)} Hz · Klarheit ${hum.clarity.toFixed(2)}`;
 }
-
-// ---------- Relief-Mesh: Gitter nur anlegen, wenn Mesh-Relief gewählt ist ----------
-let meshVao = null, meshCount = 0, meshPolys = 0;
-function ensureMesh() {
-  const want = S.reliefMode === 2 && fractalOn() ? S.meshPolys : 0;
-  if (want === meshPolys) return;
-  meshPolys = want;
-  if (!want) { meshVao = null; meshCount = 0; return; }
-  const n = Math.max(2, Math.round(Math.sqrt(want / 2)));   // n×n Quads à 2 Dreiecke
-  const pts = new Float32Array((n + 1) * (n + 1) * 2);
-  for (let y = 0, k = 0; y <= n; y++) for (let x = 0; x <= n; x++) { pts[k++] = x / n; pts[k++] = y / n; }
-  const idx = new Uint32Array(n * n * 6);
-  for (let y = 0, k = 0; y < n; y++) for (let x = 0; x < n; x++) {
-    const a = y * (n + 1) + x, b = a + 1, c = a + n + 1, d = c + 1;
-    idx.set([a, b, d, a, d, c], k); k += 6;
-  }
-  meshVao = gl.createVertexArray();
-  gl.bindVertexArray(meshVao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-  gl.bufferData(gl.ARRAY_BUFFER, pts, gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
-  meshCount = idx.length;
-}
-const mainDepth = () => Math.max(SCENE.depth + (Math.floor((fracCount - 1) / 2) - (fracCount - 1) / 2) * S.fracDepth, 0.1);
 
 // ---------- Szene zeichnen ----------
 function flyUniforms(u, proj, view, cam, vpH) {
@@ -608,16 +539,13 @@ function drawScene(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uFracOff, S.fracDepth);
   gl.uniform1f(u.uHue, hue);
   gl.uniform1f(u.uBlend, S.fracBlend);
-  gl.uniform1f(u.uRelief, S.reliefMode === 1 ? S.relief : 0);
-  gl.uniform1f(u.uReliefBlur, S.reliefBlur);
-  gl.uniform1f(u.uSkipMain, fractalOn() && S.reliefMode === 2 ? 1 : 0);
   gl.uniform1f(u.uIOR, S.ior);
+  gl.uniform1f(u.uEdgeSoft, S.edgeSoft);
+  gl.uniform1f(u.uFracCenter, fracCenter());
   gl.uniform1f(u.uGlow, S.glow);
   gl.uniform1f(u.uR, 0.49);
   gl.uniform1f(u.uShape, S.shape);
   gl.uniform1f(u.uLobe, SCENE.lobe);
-  gl.uniform1f(u.uReliefSteps, S.reliefSteps);
-  gl.uniform1f(u.uFracRad, SCENE.fracR * S.fracZoom * fracBreath() * 2.4);
   gl.uniform1f(u.uGrain, S.bgGrain ? S.bgStrength : 0);
   gl.uniform1f(u.uGrainSize, S.bgSize);
   gl.uniform1f(u.uGrainT, grainT);
@@ -629,39 +557,6 @@ function drawScene(proj, view, cam, vpW, vpH) {
   gl.uniform1i(u.uFracArr, 4);
   gl.bindVertexArray(quad);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
-
-  // Relief als Mesh: innerste Fraktal-Ebene als verschobenes Gitter (vormultipliziert "über")
-  ensureMesh();
-  if (meshVao && fractalOn()) {
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    gl.useProgram(meshProg.p);
-    const g = meshProg.u;
-    gl.uniformMatrix4fv(g.uProj, false, proj);
-    gl.uniformMatrix4fv(g.uView, false, view);
-    gl.uniform3fv(g.uCenter, SCENE.center);
-    gl.uniform3fv(g.uCam, cam);
-    gl.uniform1f(g.uMain, Math.floor((fracCount - 1) / 2));
-    gl.uniform1f(g.uLod, S.reliefBlur);
-    const base = mainDepth();
-    gl.uniform1f(g.uBase, base);
-    gl.uniform1f(g.uDisp, Math.min(S.relief, base - 0.05));   // nicht durch die Wasserebene
-    gl.uniform1f(g.uHalfSize, Math.min(SCENE.fracR * S.fracZoom * 2.4, SCENE.partExtent));
-    gl.uniform1f(g.uExtent, SCENE.partExtent);
-    gl.uniform1f(g.uWaterR, SCENE.waterR);
-    gl.uniform1f(g.uBump, SCENE.bump * SIM_SIZE / 512);
-    gl.uniform1f(g.uTexel, 1 / SIM_SIZE);
-    gl.uniform1f(g.uIOR, S.ior);
-    gl.activeTexture(gl.TEXTURE4);
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
-    gl.uniform1i(g.uFracArr, 4);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, simA.tex);
-    gl.uniform1i(g.uWave, 0);
-    gl.bindVertexArray(meshVao);
-    gl.drawElements(gl.TRIANGLES, meshCount, gl.UNSIGNED_INT, 0);
-    gl.disable(gl.BLEND);
-  }
 
   // Sand auf der Wasseroberfläche (additiv)
   if (sandSize && sandVis > 0.003) {
@@ -676,6 +571,10 @@ function drawScene(proj, view, cam, vpW, vpH) {
     gl.uniform1f(g.uSize, S.sandSize);
     gl.uniform1f(g.uPxScale, proj[5] * vpH * 0.5);
     gl.uniform1f(g.uVis, sandVis);
+    gl.uniform3fv(g.uCam, cam);
+    gl.uniform1f(g.uSandPos, S.sandPos);
+    gl.uniform1f(g.uSandSpread, S.sandSpread);
+    gl.uniform1f(g.uEdgeSoft, S.edgeSoft);
     gl.uniform1f(g.uR, 0.49);
     gl.uniform1f(g.uShape, S.shape);
     gl.uniform1f(g.uLobe, SCENE.lobe);
@@ -885,7 +784,6 @@ async function initXR() {
 }
 
 async function startXR() {
-  ensureTone();   // Audio für den linken Trigger – hier noch innerhalb des Klicks anlegen
   const session = await navigator.xr.requestSession('immersive-vr');
   xrSession = session;
   await gl.makeXRCompatible();
@@ -906,7 +804,7 @@ async function startXR() {
   session.addEventListener('end', () => {
     xrSession = null;
     lastT = 0;
-    ctrlValue = leftValue = 0;
+    ctrlValue = 0;
     if (previewOn) { previewRunning = true; requestAnimationFrame(previewFrame); }
   });
   session.requestAnimationFrame(xrFrame);
@@ -927,21 +825,18 @@ function xrFrame(t, frame) {
   const hp = pose.transform.position;
   gazeFromRay([hp.x, hp.y, hp.z], forward(pose.transform.orientation));
 
-  // Controller: rechts = Stärke (Trigger-Druck) + Ort (unsichtbarer Strahl der Hand), links = Frequenz
-  ctrlValue = 0; leftValue = 0;
+  // Controller (beide Hände): Stärke = Trigger-Druck, Ort = unsichtbarer Strahl der fester gedrückten Hand
+  ctrlValue = 0;
   for (const src of session.inputSources) {
     if (!src.gamepad || !src.gamepad.buttons.length) continue;
     const v = src.gamepad.buttons[0].value;          // Trigger, analog 0..1
-    if (src.handedness === 'right') {
-      ctrlValue = v;
-      const rp = frame.getPose(src.targetRaySpace, refSpace);
-      if (rp) {
-        const o = rp.transform.position;
-        const uv = rayToUV([o.x, o.y, o.z], forward(rp.transform.orientation), 0.42);
-        if (uv) ctrlUV = uv;
-      }
-    } else if (src.handedness === 'left') {
-      leftValue = v;
+    if (v <= ctrlValue) continue;
+    ctrlValue = v;
+    const rp = frame.getPose(src.targetRaySpace, refSpace);
+    if (rp) {
+      const o = rp.transform.position;
+      const uv = rayToUV([o.x, o.y, o.z], forward(rp.transform.orientation), 0.42);
+      if (uv) ctrlUV = uv;
     }
   }
   update(t);

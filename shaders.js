@@ -13,10 +13,11 @@ float boundary(float th) {
   float a = mod(th - 1.5707963, seg) - seg * 0.5;   // eine Ecke zeigt nach oben
   return uR * cos(3.14159265 / uShape) / cos(a);
 }
+uniform float uEdgeSoft;  // Breite der optischen Randausblendung (Anteil des Radius)
 // 1 im Inneren, weich auf 0 zum Rand hin (c = UV - 0.5)
 float edgeFade(vec2 c) {
   float rb = boundary(atan(c.y, c.x));
-  return smoothstep(rb, rb * 0.72, length(c));
+  return 1.0 - smoothstep(rb * (1.0 - max(uEdgeSoft, 0.001)), rb, length(c));
 }`;
 
 // ---------- Wellensimulation ----------
@@ -276,12 +277,8 @@ uniform float uFracOff;   // Abstand der Fraktal-Ebenen (m)
 uniform float uHue;       // Farbton-Verschiebung des Fraktals
 uniform float uIOR;       // Brechungsindex des Wassers
 uniform float uGlow;      // Leuchten der Wellenberge/-täler (0 = aus)
-uniform float uSkipMain;  // 1 = innerste Fraktal-Ebene wird als Mesh gezeichnet (nicht hier)
-uniform float uReliefBlur; // Weichzeichnung der Relief-Höhenkarte (Mipmap-Stufe)
 uniform float uBlend;     // Mischmodus der Fraktal-Ebenen: 0 Normal, 1 Additiv, 2 Screen, 3 Difference, 4 Aufhellen
-uniform float uRelief;    // Relief-Tiefe (m), 0 = aus
-uniform float uReliefSteps; // Abtastschritte des Reliefs
-uniform float uFracRad;   // Radius, außerhalb dessen kein Relief berechnet wird (m)
+uniform float uFracCenter; // Index der stärksten Ebene (0 = vorderste, sonst Mitte)
 uniform float uGrain;     // Stärke des Hintergrund-Korns (0 = aus)
 uniform float uGrainSize; // Korngröße
 uniform float uGrainT;    // integrierte Animationszeit
@@ -315,42 +312,6 @@ vec3 blendLayer(vec3 base, vec4 l) {
 
 vec2 fracUV(vec2 p) { return p / (2.0 * uExtent) + 0.5; }
 
-// Relief per Parallax-Occlusion-Mapping: Helligkeit des Fraktals = Höhe (hell = näher).
-// Der gebrochene Strahl wird schrittweise durch die Höhenschicht verfolgt, bis er die Oberfläche trifft.
-// Läuft nur, wenn aktiviert und der Strahl in der Nähe des Fraktals ist.
-vec2 reliefHit(vec3 rr, vec2 ps, float base, float li, out float shade) {
-  shade = 1.0;
-  if (uRelief <= 0.0 || length(ps) > uFracRad) return ps;
-  float iz = 1.0 / max(-rr.z, 0.05);
-  float rel = min(uRelief, base - 0.05);
-  float top = base - rel;                       // vorderste mögliche Tiefe
-  float n = uReliefSteps;
-  float prevD = top, prevGap = -1.0;
-  vec2 hit = ps;
-  for (int i = 0; i <= 64; i++) {
-    if (float(i) > n) break;
-    float d = top + rel * float(i) / n;         // aktuelle Strahltiefe
-    vec2 p = vLocal + rr.xy * d * iz;
-    float h = textureLod(uFracArr, vec3(fracUV(p), li), uReliefBlur).a;
-    float gap = d - (base - h * rel);           // >= 0: Strahl ist hinter der Oberfläche
-    if (gap >= 0.0) {
-      float k = prevGap < 0.0 ? clamp(-prevGap / (gap - prevGap), 0.0, 1.0) : 0.0;
-      d = mix(prevD, d, k);
-      hit = vLocal + rr.xy * d * iz;
-      break;
-    }
-    prevD = d; prevGap = gap;
-  }
-  // einfache Beleuchtung aus der Höhen-Steigung
-  float e = 2.0 * uExtent / float(textureSize(uFracArr, 0).x) * 2.0;
-  e *= exp2(uReliefBlur);
-  float hx = textureLod(uFracArr, vec3(fracUV(hit + vec2(e, 0.0)), li), uReliefBlur).a - textureLod(uFracArr, vec3(fracUV(hit - vec2(e, 0.0)), li), uReliefBlur).a;
-  float hy = textureLod(uFracArr, vec3(fracUV(hit + vec2(0.0, e)), li), uReliefBlur).a - textureLod(uFracArr, vec3(fracUV(hit - vec2(0.0, e)), li), uReliefBlur).a;
-  vec3 nrm = normalize(vec3(-hx, -hy, e * 4.0 / max(rel, 0.01)));
-  shade = 0.7 + 0.6 * max(dot(nrm, normalize(vec3(-0.5, 0.7, 0.6))), 0.0);
-  return hit;
-}
-
 // Animiertes Korn: Zellen driften langsam und funkeln weich (kein hartes Flackern)
 float grainLayer(vec2 p, float k) {
   vec2 q = p * 175.0 / uGrainSize * (1.0 + 0.15 * k);
@@ -379,12 +340,14 @@ void main() {
   float hR = texture(uWave, wuv + vec2(uTexel, 0.0)).r;
   float hD = texture(uWave, wuv - vec2(0.0, uTexel)).r;
   float hU = texture(uWave, wuv + vec2(0.0, uTexel)).r;
-  vec2 grad = vec2(hR - hL, hU - hD) * uBump;
+  // Nur optisch zum Behälterrand hin abschwächen – die Simulation reflektiert weiter in voller Stärke
+  vec2 grad = vec2(hR - hL, hU - hD) * uBump * edgeFade(wuv - 0.5);
   vec3 n = normalize(vec3(-grad, 1.0));
 
   // --- Brechung: Strahl durch die Wasserebene auf die Sonnenebene ---
   vec3 ray = normalize(vWorld - uCam);
   vec3 rr  = refract(ray, n, 1.0 / uIOR);
+  if (dot(rr, rr) < 0.5) rr = reflect(ray, n) * vec3(1.0, 1.0, -1.0);   // IOR < 1: Totalreflexion -> gespiegelt weiter
   float t  = uDepth / max(-rr.z, 0.05);
   vec2 ps  = vLocal + rr.xy * t;
 
@@ -396,9 +359,9 @@ void main() {
   } else {
     // Fraktal: weiter Glow wie bei der Sonne, im aktuellen Farbton
     col = ground(ps) + hueShift(vec3(0.22, 0.03, 0.01), uHue) * exp(-length(ps) / (1.4 * 1.2));
-    // Ebenen symmetrisch um die innerste verteilt (Index 0 = vorne), von hinten nach vorne komponiert.
-    // Die innerste Ebene ist die Hauptform (volle Deckkraft, Relief, verdeckt die hintere Corona).
-    float center = (uFracCount - 1.0) * 0.5;
+    // Ebenen um die stärkste verteilt (Index 0 = vorne), von hinten nach vorne komponiert.
+    // Die stärkste Ebene ist die Hauptform und verdeckt die hintere Corona.
+    float center = uFracCenter;
     int mainIdx = int(floor(center));
     float iz = 1.0 / max(-rr.z, 0.05);
     cover = 0.0;
@@ -406,17 +369,8 @@ void main() {
       if (float(i) >= uFracCount) continue;
       float d = max(uDepth + (float(i) - center) * uFracOff, 0.1);
       vec2 pl = vLocal + rr.xy * (d * iz);
-      vec4 f;
-      if (i == mainIdx) {
-        if (uSkipMain > 0.5) continue;
-        float shade;
-        pl = reliefHit(rr, pl, d, float(i), shade);
-        f = texture(uFracArr, vec3(fracUV(pl), float(i)));
-        f.rgb *= shade;
-        cover = f.a;
-      } else {
-        f = texture(uFracArr, vec3(fracUV(pl), float(i)));
-      }
+      vec4 f = texture(uFracArr, vec3(fracUV(pl), float(i)));
+      if (i == mainIdx) cover = f.a;
       col = blendLayer(col, f);
     }
   }
@@ -479,8 +433,8 @@ uniform float uIdOffset; // trennt die Partikel der drei Ebenen
 uniform float uSizeMul;  // Größe aus dem UI
 uniform float uNoise;    // Frequenz-Faktor des Emissions-Noise (größer = feiner)
 uniform float uMode;     // 0 = Sonne, 1 = Fraktal
-uniform highp sampler2DArray uFrac; // Fraktal-Ebenen -> Geburtsort und Farbe (aus der innersten)
-uniform float uFracMain;  // Index der innersten Ebene
+uniform highp sampler2DArray uFrac; // Fraktal-Ebenen -> Geburtsort und Farbe (aus der stärksten)
+uniform float uFracMain;  // Index der stärksten Ebene
 uniform float uFracR;    // Radius, in dem Fraktal-Partikel entstehen können
 out float vA;
 out vec3 vCol;
@@ -764,6 +718,9 @@ uniform float uWaterR;
 uniform float uSize;      // Korngröße (m)
 uniform float uPxScale;
 uniform float uVis;       // Sichtbarkeit (steigt beim Summen, klingt danach ab)
+uniform vec3  uCam;
+uniform float uSandPos;   // Abstand vor der Wasserfläche Richtung Betrachter (m)
+uniform float uSandSpread;// zufällige Streuung in der Tiefe (m)
 out float vA;
 ${BOUNDARY_GLSL}
 void main() {
@@ -771,13 +728,17 @@ void main() {
   ivec2 ij = ivec2(gl_VertexID % w, gl_VertexID / w);
   vec4 s = texelFetch(uState, ij, 0);
   vec2 p = s.xy;
-  vec3 world = uCenter + vec3((p - 0.5) * 2.0 * uWaterR, 0.02);
+  // Tiefe: fester Abstand + feste zufällige Streuung je Korn (aus seiner Saat)
+  float spread = (fract(s.w * 47.13) - 0.5) * uSandSpread;
+  float z = clamp(uSandPos + spread, 0.0, -uCenter.z - 0.2);
+  vec3 world = uCenter + vec3((p - 0.5) * 2.0 * uWaterR, 0.02 + z);
   vec4 vp = uView * vec4(world, 1.0);
   gl_Position = uProj * vp;
   gl_PointSize = clamp(uSize * uPxScale / max(-vp.z, 0.1), 1.0, 8.0);
   float env = texture(uWave, p).b;
   float calm = 1.0 - smoothstep(0.02, 0.2, env);      // in den Knotenlinien heller
-  vA = uVis * sin(3.14159 * clamp(s.z, 0.0, 1.0)) * edgeFade(p - 0.5) * (0.25 + 0.75 * calm);
+  vA = uVis * sin(3.14159 * clamp(s.z, 0.0, 1.0)) * edgeFade(p - 0.5) * (0.25 + 0.75 * calm)
+     * smoothstep(0.25, 0.9, length(world - uCam));   // kurz vor der Kamera ausblenden
 }`;
 
 export const sandFS = `#version 300 es
@@ -788,79 +749,4 @@ out vec4 o;
 void main() {
   float m = max(1.0 - length(gl_PointCoord * 2.0 - 1.0), 0.0);
   o = vec4(uColor * vA * m, 1.0);
-}`;
-
-// ---------- Relief als Mesh ----------
-// Unterteiltes Gitter für die innerste Fraktal-Ebene; Höhe = (weichgezeichnete) Helligkeit.
-// Nur in Gebrauch, wenn Relief-Modus "Mesh" gewählt ist.
-export const meshVS = `#version 300 es
-in vec2 aPos;                 // 0..1
-uniform mat4 uProj;
-uniform mat4 uView;
-uniform vec3 uCenter;
-uniform highp sampler2DArray uFracArr;
-uniform float uMain;          // Index der innersten Ebene
-uniform float uLod;           // Weichzeichnung (Mipmap-Stufe)
-uniform float uDisp;          // Verschiebung zum Betrachter (m)
-uniform float uBase;          // Tiefe der Ebene hinter dem Wasser (m)
-uniform float uHalfSize;      // halbe Kantenlänge des Gitters (m)
-uniform float uExtent;
-out vec3 vWorld;
-out vec2 vFuv;
-out vec3 vNormal;
-float H(vec2 fuv) { return textureLod(uFracArr, vec3(fuv, uMain), uLod).a; }
-void main() {
-  vec2 local = (aPos * 2.0 - 1.0) * uHalfSize;
-  vec2 fuv = local / (2.0 * uExtent) + 0.5;
-  float h = H(fuv);
-  vec3 world = uCenter + vec3(local, -uBase + h * uDisp);
-  // weiche Normale aus der (weichgezeichneten) Höhenkarte statt flacher Dreiecks-Normalen
-  float e = exp2(uLod) / float(textureSize(uFracArr, 0).x) * 1.5;
-  float hx = H(fuv + vec2(e, 0.0)) - H(fuv - vec2(e, 0.0));
-  float hy = H(fuv + vec2(0.0, e)) - H(fuv - vec2(0.0, e));
-  float m = 2.0 * e * 2.0 * uExtent;               // Abstand der Proben in Metern
-  vNormal = normalize(vec3(-hx * uDisp / m, -hy * uDisp / m, 1.0));
-  vWorld = world;
-  vFuv = fuv;
-  gl_Position = uProj * uView * vec4(world, 1.0);
-}`;
-
-export const meshFS = `#version 300 es
-precision highp float;
-uniform highp sampler2DArray uFracArr;
-uniform sampler2D uWave;
-uniform float uMain;
-uniform vec3 uCam;
-uniform vec3 uCenter;
-uniform float uWaterR;
-uniform float uBump;
-uniform float uTexel;
-uniform float uIOR;
-uniform float uBase;
-uniform float uExtent;
-in vec3 vWorld;
-in vec2 vFuv;
-in vec3 vNormal;
-out vec4 o;
-void main() {
-  // Wo schneidet der Sichtstrahl die Wasseroberfläche? Dort die Wellen-Neigung lesen
-  vec3 ray = normalize(vWorld - uCam);
-  float t = (uCenter.z - uCam.z) / ray.z;
-  vec2 wl = uCam.xy + ray.xy * t - uCenter.xy;
-  vec2 wuv = wl / (2.0 * uWaterR) + 0.5;
-  float hL = texture(uWave, wuv - vec2(uTexel, 0.0)).r;
-  float hR = texture(uWave, wuv + vec2(uTexel, 0.0)).r;
-  float hD = texture(uWave, wuv - vec2(0.0, uTexel)).r;
-  float hU = texture(uWave, wuv + vec2(0.0, uTexel)).r;
-  vec2 grad = vec2(hR - hL, hU - hD) * uBump;
-  // Näherung der Brechung: Versatz ~ Neigung × Tiefe unter dem Wasser
-  float depthBelow = uCenter.z - vWorld.z;
-  vec2 off = grad * depthBelow * (1.0 - 1.0 / uIOR) * 0.8;
-  vec4 f = texture(uFracArr, vec3(vFuv + off / (2.0 * uExtent), uMain));
-
-  // Licht aus der Geometrie-Neigung (macht die Tiefe lesbar)
-  vec3 nrm = normalize(vNormal);
-  float shade = 0.65 + 0.6 * max(dot(nrm, normalize(vec3(-0.5, 0.7, 0.6))), 0.0);
-  f.rgb *= shade * (1.0 - clamp(length(grad) * 1.1, 0.0, 0.7));
-  o = f;                       // vormultipliziert
 }`;
