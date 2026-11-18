@@ -2,7 +2,7 @@
 // Vanilla WebGL2 + WebXR. Teilt Stimmerkennung/-effekte (audio.js) und VR-Menü (vrmenu.js) mit Soothing Ripples.
 import {
   skyVS, skyFS, terrainVS, terrainFS, ballVS, ballFS, sparkVS, sparkFS,
-  ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS, wingVS, wingFS, WING_FEATHERS, MAX_LIGHTS,
+  ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS, wingVS, wingFS, WING_FEATHERS, MAX_LIGHTS, compFS,
 } from './flowshaders.js';
 import { FlowAudio } from './flowsound.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
@@ -44,6 +44,7 @@ const SECTIONS = [
     fdLevel:     { label: 'Level', options: [[1, 'Level 1 – Rolling Hills']], def: 1 },
     fdGoals:     { label: 'Goals', min: 5, max: 80, step: 1, def: 30 },
     fdCompanion: { label: 'Companion chance', min: 0, max: 1, step: 0.05, def: 0.35 },
+    fdMagnet:    { label: 'Companion magnet', min: 0.5, max: 8, step: 0.25, def: 2.5 },
   }},
   { title: 'Camera', items: {
     fdCam:  { label: 'POV ↔ third person', min: 0, max: 1, step: 0.01, def: 0.75 },
@@ -53,12 +54,18 @@ const SECTIONS = [
     fdThrust:   { label: 'Thrust', min: 0.5, max: 12, step: 0.5, def: 4 },
     fdFriction: { label: 'Friction', min: 0.05, max: 1.5, step: 0.05, def: 0.35 },
     fdMaxSpeed: { label: 'Max speed (m/s)', min: 2, max: 20, step: 0.5, def: 9 },
+    fdIOR:      { label: 'Refraction (IOR)', min: 1, max: 2.2, step: 0.01, def: 1.4 },
+    fdRough:    { label: 'Roughness', min: 0, max: 1, step: 0.05, def: 0.25 },
+    fdLayers:   { label: 'Inner layers', min: 0, max: 3, step: 1, def: 3 },
+    fdRipples:  { label: 'Surface ripples', min: 0, max: 2, step: 0.05, def: 1 },
   }},
   { title: 'Effects', items: {
     fdTrail:     { label: 'Trail density', min: 0, max: 80, step: 2, def: 30 },
     fdTrailLife: { label: 'Trail lifetime (s)', min: 3, max: 60, step: 1, def: 25 },
     fdRings:     { label: 'Warp rings', min: 0, max: 2, step: 0.05, def: 1 },
     fdRibbon:    { label: 'Ribbon length (s)', min: 0, max: 4, step: 0.1, def: 1.8 },
+    fdLines:     { label: 'Glowing ground lines', min: 0, max: 1.5, step: 0.05, def: 0.5 },
+    fdGrain:     { label: 'Ground grain', min: 0, max: 1, step: 0.05, def: 0.5 },
   }},
   { title: 'Audio', items: {
     fdMusic: { label: 'Music volume', min: 0, max: 1.5, step: 0.05, def: 0.7 },
@@ -121,7 +128,7 @@ function program(vs, fs) {
 const P = {
   sky: program(skyVS, skyFS), terrain: program(terrainVS, terrainFS), ball: program(ballVS, ballFS),
   spark: program(sparkVS, sparkFS), ring: program(ringVS, ringFS), ribbon: program(ribbonVS, ribbonFS),
-  glow: program(glowVS, glowFS), wing: program(wingVS, wingFS),
+  glow: program(glowVS, glowFS), wing: program(wingVS, wingFS), comp: program(ballVS, compFS),
 };
 const emptyVao = gl.createVertexArray();
 
@@ -381,7 +388,7 @@ function uploadTrail() {
 const RING_LIFE = 1.6;
 function updateRings(dt) {
   if (S.fdRings > 0 && propel > 0.12) {
-    ringTimer += dt * propel * 6;
+    ringTimer += dt * propel * 10;
     if (ringTimer > 1) {
       ringTimer = 0;
       rings.push({ pos: [...ball.pos], back: [-moveDir[0], 0, -moveDir[1]], birth: time, hue });
@@ -412,30 +419,50 @@ function updateGoals(dt) {
   while (goals.length < S.fdGoals) goals.push(placeGoal(ball.pos[0], ball.pos[2], 20, 55));
   if (goals.length > S.fdGoals) goals.length = S.fdGoals;
 
-  // Begleiter: eigene Rollkugeln, laufen versetzt hinter der Hauptkugel her (folgen, rollen, schweben mit)
-  const side = [-moveDir[1], moveDir[0]];
-  companions.forEach((c, k) => {
-    const back = 0.9 + 0.5 * k;
-    const sway = Math.sin(c.phase + time * 0.5) * (0.5 + 0.2 * (k % 3)) * (k % 2 ? 1 : -1);
-    const tx = ball.pos[0] - moveDir[0] * back + side[0] * sway;
-    const tz = ball.pos[2] - moveDir[1] * back + side[1] * sway;
-    // Wunschtempo = Tempo der Hauptkugel + Korrektur zum Zielpunkt -> bleiben auch bei Fahrt dicht dran
-    const want = [ball.vel[0] + (tx - c.pos[0]) * 2.2, ball.vel[1] + (tz - c.pos[2]) * 2.2];
-    const kv = Math.min(dt * 3.5, 1);
-    c.vel[0] += (want[0] - c.vel[0]) * kv;
-    c.vel[1] += (want[1] - c.vel[1]) * kv;
-    // Abstand zur Hauptkugel und untereinander halten
-    for (const o of [{ pos: ball.pos, r: R }, ...companions.filter((x) => x !== c).map((x) => ({ pos: x.pos, r: RC }))]) {
-      const dx = c.pos[0] - o.pos[0], dz = c.pos[2] - o.pos[2], d = Math.hypot(dx, dz), min = RC + o.r + 0.05;
-      if (d < min && d > 1e-4) { c.pos[0] += dx / d * (min - d); c.pos[2] += dz / d * (min - d); }
-    }
-    const px = c.pos[0], pz = c.pos[2];
+  // Begleiter: rollen immer am Boden und werden magnetisch von der Hauptkugel angezogen.
+  // Zug wächst mit dem Abstand (weit weg = schnell hinterher), nahe dran bremsen sie relativ zur Hauptkugel ab
+  // und stoßen nur sanft an (mit leisem Klang). Unabhängig von Blick und Kamera.
+  companions.forEach((c) => {
+    const dx = ball.pos[0] - c.pos[0], dz = ball.pos[2] - c.pos[2];
+    const d = Math.hypot(dx, dz) || 1e-4;
+    const gap = Math.max(d - (R + RC), 0);
+    const pull = S.fdMagnet * gap * (1 + 0.35 * gap);           // stärker, je weiter weg
+    const near = Math.exp(-gap * 2.5);                            // nahe dran: mehr Bremsen
+    const rvx = c.vel[0] - ball.vel[0], rvz = c.vel[1] - ball.vel[1];
+    const [cgx, cgz] = terrainGrad(c.pos[0], c.pos[2]);
+    const slope = (5 / 7) * G * 0.6;
+    c.vel[0] += (dx / d * pull - rvx * (0.4 + 2.6 * near) - slope * cgx) * dt;
+    c.vel[1] += (dz / d * pull - rvz * (0.4 + 2.6 * near) - slope * cgz) * dt;
     c.pos[0] += c.vel[0] * dt;
     c.pos[2] += c.vel[1] * dt;
-    const gh = terrainH(c.pos[0], c.pos[2]);
-    const floatY = wing * (0.7 + 0.12 * Math.sin(time * 1.7 + c.phase));
-    c.pos[1] += (gh + RC + floatY - c.pos[1]) * Math.min(dt * (wing > 0.05 ? 3 : 20), 1);
-    const step = [c.pos[0] - px, 0, c.pos[2] - pz];
+  });
+  // Kollisionen: Begleiter ↔ Hauptkugel (nur wenn sie unten ist) und untereinander, weich mit wenig Rückprall
+  const bodies = [{ pos: ball.pos, vel: ball.vel, r: R, main: true }, ...companions.map((c) => ({ pos: c.pos, vel: c.vel, r: RC, c }))];
+  for (let a = 0; a < bodies.length; a++) for (let b = a + 1; b < bodies.length; b++) {
+    const A = bodies[a], B = bodies[b];
+    if (!B.c) continue;
+    if (A.main && ball.pos[1] - (terrainH(ball.pos[0], ball.pos[2]) + R) > 0.3) continue;   // Hauptkugel in der Luft
+    const dx = B.pos[0] - A.pos[0], dz = B.pos[2] - A.pos[2], d = Math.hypot(dx, dz), min = A.r + B.r;
+    if (d >= min || d < 1e-5) continue;
+    const nx = dx / d, nz = dz / d;
+    const wA = A.main ? 0.1 : 0.5, wB = A.main ? 0.9 : 0.5;          // Hauptkugel ist schwerer
+    const push = min - d;
+    if (!A.main) { A.pos[0] -= nx * push * wA; A.pos[2] -= nz * push * wA; }
+    B.pos[0] += nx * push * wB; B.pos[2] += nz * push * wB;
+    const vn = (B.vel[0] - A.vel[0]) * nx + (B.vel[1] - A.vel[1]) * nz;
+    if (vn < 0) {
+      const j = -(1 + 0.25) * vn;                                   // Rückprall 0,25
+      if (!A.main) { A.vel[0] -= nx * j * wA; A.vel[1] -= nz * j * wA; }
+      B.vel[0] += nx * j * wB; B.vel[1] += nz * j * wB;
+      if (-vn > 0.25 && sound && time - (B.c.lastClick || 0) > 0.12) {
+        B.c.lastClick = time;
+        sound.click([(A.pos[0] + B.pos[0]) / 2, B.pos[1], (A.pos[2] + B.pos[2]) / 2], Math.min(-vn / 3, 1));
+      }
+    }
+  }
+  companions.forEach((c, k) => {
+    c.pos[1] = terrainH(c.pos[0], c.pos[2]) + RC;
+    const step = [c.vel[0] * dt, 0, c.vel[1] * dt];
     const d = Math.hypot(step[0], step[2]);
     if (d > 1e-5) {
       c.rot = mul3(axisAngle3(v3.norm(v3.cross([0, 1, 0], step)), d / RC), c.rot);
@@ -566,13 +593,16 @@ function lightUniforms(u) {
   gl.uniform3fv(u['uLightCol[0]'], col);
 }
 
-function drawBall(u, pos, r, rot, light, swirl) {
+function drawSphere(u, pos, r, rot) {
   gl.uniform3fv(u.uPos, pos);
   gl.uniform1f(u.uR, r);
   gl.uniformMatrix3fv(u.uRot, false, rot);
-  gl.uniform1f(u.uLight, light);
-  gl.uniform1f(u.uSwirl, swirl);
   gl.drawElements(gl.TRIANGLES, sphereMesh.count, gl.UNSIGNED_INT, 0);
+}
+// Weiche Schnitte: Hauptkugel als Referenz für alle Effekt-Shader
+function softUniforms(u) {
+  gl.uniform3fv(u.uBallPos, ball.pos);
+  gl.uniform1f(u.uBallR, R);
 }
 
 function drawWorld(proj, view, cam, vpW, vpH) {
@@ -603,13 +633,24 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uHue, hue);
   gl.uniform1f(u.uTime, time);
   gl.uniform1f(u.uFogDensity, 0.05);
+  gl.uniform1f(u.uGrain, S.fdGrain);
+  gl.uniform1f(u.uLines, S.fdLines);
   lightUniforms(u);
   gl.bindVertexArray(terrainMesh.vao);
   gl.drawElements(gl.TRIANGLES, terrainMesh.count, gl.UNSIGNED_INT, 0);
 
-  // Kugeln: gläsern (vormultipliziert über den Hintergrund), schreiben Tiefe
-  gl.enable(gl.BLEND);
-  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  // Begleiter: leuchtende Kugeln (deckend)
+  gl.bindVertexArray(sphereMesh.vao);
+  if (companions.length) {
+    u = P.comp.u;
+    gl.useProgram(P.comp.p);
+    gl.uniformMatrix4fv(u.uProj, false, proj);
+    gl.uniformMatrix4fv(u.uView, false, view);
+    gl.uniform3fv(u.uCam, cam);
+    gl.uniform1f(u.uHue, hue + 0.25);
+    for (const c of companions) drawSphere(u, c.pos, RC, c.rot);
+  }
+  // Hauptkugel: Glasmurmel (im Shader verfolgt, deckend -> keine Sortierprobleme)
   u = P.ball.u;
   gl.useProgram(P.ball.p);
   gl.uniformMatrix4fv(u.uProj, false, proj);
@@ -617,11 +658,16 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform3fv(u.uCam, cam);
   gl.uniform1f(u.uHue, hue);
   gl.uniform1f(u.uTime, time);
-  gl.bindVertexArray(sphereMesh.vao);
-  for (const c of companions) drawBall(u, c.pos, RC, c.rot, 1.3, 0.6);
-  drawBall(u, ball.pos, R, ball.rot, 0.45 + 0.55 * driveVis, 1.0);
+  gl.uniform1f(u.uLight, 0.45 + 0.55 * driveVis);
+  gl.uniform1f(u.uIOR, S.fdIOR);
+  gl.uniform1f(u.uRough, S.fdRough);
+  gl.uniform1i(u.uLayers, S.fdLayers);
+  gl.uniform3f(u.uEmit, -moveDir[0], 0, -moveDir[1]);
+  gl.uniform1f(u.uRipple, S.fdRipples * Math.min(driveVis * 1.4, 1));
+  drawSphere(u, ball.pos, R, ball.rot);
 
-  // Leuchtendes: additiv, verdeckt vom Gelände, schreibt keine Tiefe
+  // Leuchtendes: additiv, verdeckt vom Gelände, schreibt keine Tiefe, blendet an Geometrie weich aus
+  gl.enable(gl.BLEND);
   gl.depthMask(false);
   gl.blendFunc(gl.ONE, gl.ONE);
 
@@ -649,6 +695,9 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   if (glowCount) {
     u = P.glow.u;
     gl.useProgram(P.glow.p);
+    softUniforms(u);
+    gl.uniform3f(u.uRight, view[0], view[4], view[8]);   // Kamera-Achsen in Welt (Zeilen der Ansicht)
+    gl.uniform3f(u.uUp, view[1], view[5], view[9]);
     gl.uniformMatrix4fv(u.uProj, false, proj);
     gl.uniformMatrix4fv(u.uView, false, view);
     gl.uniform1f(u.uPxScale, pxScale);
@@ -660,6 +709,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   if (ribbonCount) {
     u = P.ribbon.u;
     gl.useProgram(P.ribbon.p);
+    softUniforms(u);
     gl.uniformMatrix4fv(u.uProj, false, proj);
     gl.uniformMatrix4fv(u.uView, false, view);
     gl.uniform3fv(u.uColor, hueRGB(GLOW, hue));
@@ -671,20 +721,21 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   if (rings.length && S.fdRings > 0) {
     u = P.ring.u;
     gl.useProgram(P.ring.p);
+    softUniforms(u);
     gl.uniformMatrix4fv(u.uProj, false, proj);
     gl.uniformMatrix4fv(u.uView, false, view);
     gl.bindVertexArray(emptyVao);
     for (const r of rings) {
       const age = time - r.birth, life = RING_LIFE;
-      const center = v3.add(r.pos, v3.scale(r.back, 0.15 + age * 0.75));
-      const rad = R * 1.15 + age * 0.35;
+      const center = v3.add(r.pos, v3.scale(r.back, 0.1 + age * 0.75));
+      const rad = R * 0.55 + age * 0.55;            // startet kleiner, wächst auf die bisherige Größe
       const ax = v3.norm(v3.cross(r.back, [0, 1, 0]));
       const ay = v3.cross(ax, r.back);
       gl.uniform3fv(u.uCenter, center);
       gl.uniform3fv(u.uU, v3.scale(ax, rad));
       gl.uniform3fv(u.uV, v3.scale(ay, rad));
       gl.uniform3fv(u.uColor, hueRGB([0.9, 0.18, 0.45], r.hue));
-      gl.uniform1f(u.uAlpha, Math.pow(1 - age / life, 1.5) * Math.min(age * 8, 1) * 0.38 * S.fdRings);
+      gl.uniform1f(u.uAlpha, Math.pow(1 - age / life, 1.5) * Math.min(age * 8, 1) * 0.22 * S.fdRings);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
   }
@@ -693,6 +744,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   if (wing > 0.02) {
     u = P.wing.u;
     gl.useProgram(P.wing.p);
+    softUniforms(u);
     gl.uniformMatrix4fv(u.uProj, false, proj);
     gl.uniformMatrix4fv(u.uView, false, view);
     gl.uniform3fv(u.uPos, ball.pos);

@@ -134,6 +134,27 @@ export class FlowAudio {
     o.start(now); o.stop(now + 0.45);
   }
 
+  // ---------- Kollision zweier Kugeln: leises, gläsernes Klicken im Raum ----------
+  click(pos, strength) {
+    const ctx = this.ctx, now = ctx.currentTime;
+    const out = this.g(0);
+    const pan = this._panner(pos, 0.6);
+    out.connect(pan).connect(this.master);
+    out.connect(this.g(0.25)).connect(this.reverb);
+    out.gain.setValueAtTime(0, now);
+    out.gain.linearRampToValueAtTime(0.09 * strength * this.volumes.sfx, now + 0.003);
+    out.gain.exponentialRampToValueAtTime(0.0004, now + 0.35);
+    const base = 1900 + Math.random() * 600;
+    for (const [ratio, vol] of [[1, 1], [2.32, 0.4], [3.9, 0.15]]) {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = base * ratio;
+      const og = this.g(vol);
+      o.connect(og).connect(out);
+      o.start(now); o.stop(now + 0.4);
+    }
+  }
+
   // ---------- Schnurren einer Begleitkugel, binaural im Raum (HRTF) ----------
   // Tiefes, gefiltertes Rauschen mit ~25 Hz "Brummen" und langsamem Ein-/Ausatmen.
   addPurr(id) {

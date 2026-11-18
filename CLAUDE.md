@@ -75,26 +75,35 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.15.0)
+## Flow Drift (Stand v0.16.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
   Himmel: Aurora-Schleier rundherum (schräge, langsam wandernde Bänder), keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
-  Boden: fast schwarz, weiche Marmorierung, Fake-Spiegelung des Himmels (Fresnel) + Höhennebel (am Boden am dichtesten, Szenenfarbe), Geländerand komplett im Nebel.
+  Boden: fast schwarz, weiche Marmorierung, feine Körnung als Bump (`fdGrain`, blendet mit Entfernung aus), Fake-Spiegelung des Himmels (Fresnel),
+  leuchtende Höhenlinien, die langsam nach oben wandern, maskiert mit großem weichem wanderndem Noise (`fdLines`),
+  Höhennebel (am Boden am dichtesten, Szenenfarbe), Geländerand komplett im Nebel.
   Grundfarben `GLOW`/`AUR_*`/`FOG` in `BASE_GLSL` (JS-Kopie `GLOW` in flowdrift.js) – alles per Hue-Shift nach Stimmfrequenz.
 - Level 1 „Rolling Hills“: unendliches Sinus-Hügel-Gelände (`terrainH` identisch in `flowshaders.js` TERRAIN_GLSL und `flowdrift.js` – beide gleich halten),
   Gitter 180² über 110 m, mitwandernd und auf Zellen gerastet. Weitere Levels: Option `fdLevel` – brauchen eigene Höhenfunktion in JS und GLSL.
-- Kugeln (Haupt r = 0,3 m, Begleiter r = 0,12 m): gläsern (vormultipliziert geblendet), Julia-Wirbel drehen sich mit, Innenlicht, Aurora-Spiegelung am Rand.
+- Hauptkugel (r = 0,3 m) = Glasmurmel, im Fragment-Shader verfolgt (deckend, nur Vorderseiten → kein sichtbares Inneres mehr):
+  Fresnel-Spiegelung, Brechung (`fdIOR`), Ripples auf der Oberfläche ab der Rückseite (Warp-Austritt, laufen nach vorn, klingen schnell ab, `fdRipples` × Antrieb),
+  0–3 eingeschlossene Schalen (`fdLayers`) mit gravurartigen Julia-Wirbellinien und versetzter Evolution (drehen mit der Kugel), Innenlicht,
+  Austritt + Hintergrund-Näherung; Roughness (`fdRough`) macht Inneres/Hintergrund weicher und Glanz breiter.
+- Begleiter (r = 0,12 m): leuchtende Kugeln (innen hell Lavendel, zum Rand Glow-Farbton), keine Fraktale.
   Innenlichter (max. 9 Punktlichter `MAX_LIGHTS`) beleuchten den Boden: diffuses Kontaktlicht + glänzender Lichtstreif (Fake-Spiegelung statt echter Reflexion).
 - Physik: Hangabtrieb nur am Boden (5/7 g × 0,6), Antrieb = Summen (alternativ Trigger / W / gedrückt halten) × Thrust, Reibung, Höchsttempo; Rollen über 3×3-Rotation.
   Sprung: A/B rechts oder Y links (X = Menü), Vorschau: Leertaste. Landung mit kleinem Rückprall + Aufprallklang.
   Flügel: Arme ausbreiten (Hände > ~1,1 m auseinander, etwa Schulterhöhe; Vorschau: F halten) → Federfächer wachsen, Kugel schwebt ~1,1 m über dem
   geglätteten Boden (Feder + sanftes Auf und Ab), folgt den Hügeln weich; in der Luft kein Hangabtrieb, kein Pfad, kein Rollgeräusch.
-- Begleiter: rollende 3D-Kugeln mit eigener Physik (Wunschtempo = Tempo der Hauptkugel + Korrektur zum versetzten Platz dahinter), Abstand zueinander, schweben mit.
+- Begleiter-Physik: rollen immer am Boden, magnetisch zur Hauptkugel (Zug ∝ Abstand × (1 + 0,35·Abstand), `fdMagnet`), nahe dran Bremsen relativ zur Hauptkugel;
+  unabhängig von Blick/Kamera. Weiche Kollisionen (Hauptkugel schwerer, Rückprall 0,25) mit leisem räumlichem Glas-Klicken.
 - Richtung/Kamera: Blickrichtung + rechter Stick lenkt; linker Stick dreht die Ansicht um die Kugel. `fdCam` 0 = POV über der Kugel … 1 = Third Person.
   Weltansicht = XR-Ansicht × inverse(Rig); VR-Menü mit lokaler Ansicht.
-- Effekte: Partikelpfad (nur am Boden), Warp-Ringe (dünn, dezent, Tunnel hinter der Kugel), Ribbon (dezent, blendet vor der Kamera aus), Goals, Explosionen, Flügel.
+- Effekte: Partikelpfad (nur am Boden), Warp-Ringe (starten klein, wachsen, dicht, dezent), Ribbon (blendet vor der Kamera aus), Goals, Explosionen, Flügel.
+  Weiche Schnitte (`SOFT_GLSL`): Ribbon, Ringe, Leucht-Sprites und Flügel blenden analytisch aus, je näher sie Gelände (`terrainH`) oder Hauptkugel kommen
+  (kein Tiefenpuffer nötig; Sprites rekonstruieren ihre Pixel-Weltposition über die Kamera-Achsen).
 - Klang (`flowsound.js`, synthetisiert, je Klang eine Methode → später gegen Dateien tauschbar), alles außer Musik binaural (HRTF-PannerNode, Hörer = Kopf):
-  Rollen am Auflagepunkt, Chime am Goal, Aufprall bei Landung, Schnurren je Begleiter. Musik generativ, nicht räumlich, lauter mit Tempo.
-- Depth-Buffer an (XR-Layer `depth: true`), Reihenfolge: Himmel → Gelände → Kugeln (Glas) → additive Effekte.
+  Rollen am Auflagepunkt, Chime am Goal, Aufprall bei Landung, Klicken bei Kollisionen, Schnurren je Begleiter. Musik generativ, nicht räumlich, lauter mit Tempo.
+- Depth-Buffer an (XR-Layer `depth: true`), Reihenfolge: Himmel → Gelände → Kugeln (deckend) → additive Effekte.
 - Tests: `?debug=1` legt den Zustand als `window.__fd` offen.
 
 ## Gemeinsam: Display
