@@ -16,7 +16,8 @@ import {
 const VERSION = 'v' + (window.VIBRATIONS_VERSION || '?');
 const params = new URLSearchParams(location.search);
 const R = 0.3;                // Kugelradius (m)
-const RC = 0.12;              // Radius der Begleitkugeln (m)
+const RC = 0.12;              // Grundradius der Begleitkugeln (m), je Kugel 0,75–1,3 ×
+const MAX_COMPANIONS = 3;     // mehr Physik + HRTF-Quellen erzeugten Audio-Knacken
 const G = 9.81;
 
 // ---------- Gelände (Level 1 „Rolling Hills“) – identisch zu TERRAIN_GLSL in flowshaders.js ----------
@@ -57,7 +58,7 @@ const SECTIONS = [
     fdMaxSpeed: { label: 'Max speed (m/s)', min: 2, max: 20, step: 0.5, def: 9 },
     fdIOR:      { label: 'Refraction (IOR)', min: 1, max: 2.2, step: 0.01, def: 1.4 },
     fdRough:    { label: 'Roughness', min: 0, max: 1, step: 0.05, def: 0.25 },
-    fdBallFresnel: { label: 'Ball fresnel', min: 0, max: 1, step: 0.05, def: 0.4 },
+    fdBallFresnel: { label: 'Ball fresnel', min: 0, max: 3, step: 0.05, def: 1.2 },
     fdLayers:   { label: 'Inner layers', min: 0, max: 3, step: 1, def: 3 },
     fdLayerScale: { label: 'Inner layer scale', min: 0.3, max: 1.2, step: 0.05, def: 1 },
     fdLayerSpin:  { label: 'Inner layer spin', min: 0, max: 2, step: 0.05, def: 1 },
@@ -226,7 +227,7 @@ const trailDirty = [];
 // Explosionen der Goals
 const bursts = pointBuffer(3000);
 const burstList = [];
-const chips = pointBuffer(1500);   // Kollisions-Splitter: fliegen weg, bleiben kurz am Boden liegen
+const chips = pointBuffer(4000);   // Kollisions-Splitter: fliegen weg, bleiben kurz am Boden liegen
 const chipList = [];
 // Goals & Begleiter
 const glowBuf = pointBuffer(256);
@@ -437,12 +438,12 @@ function updateHistory() {
 function updateGoals(dt) {
   for (let i = goals.length - 1; i >= 0; i--) {
     const g = goals[i];
-    const gy = terrainH(g.x, g.z) + 0.8;
+    const gy = terrainH(g.x, g.z) + R;
     const d = Math.hypot(g.x - ball.pos[0], gy - ball.pos[1], g.z - ball.pos[2]);
-    if (d < R + 0.55) {
+    if (d < R + 0.12) {
       explode([g.x, gy, g.z], hue + g.hue);
       if (sound) sound.chime([g.x, gy, g.z]);
-      if (g.companion && companions.length < 8) spawnCompanion([g.x, gy, g.z]);
+      if (g.companion) spawnCompanion([g.x, gy, g.z]);
       goals.splice(i, 1);
       goals.push(placeGoal(ball.pos[0], ball.pos[2], 25, 55));   // Ersatz weiter weg
     }
@@ -454,21 +455,26 @@ function updateGoals(dt) {
   // Zug wächst mit dem Abstand (weit weg = schnell hinterher), nahe dran bremsen sie relativ zur Hauptkugel ab
   // und stoßen nur sanft an (mit leisem Klang). Unabhängig von Blick und Kamera.
   companions.forEach((c) => {
-    const dx = ball.pos[0] - c.pos[0], dz = ball.pos[2] - c.pos[2];
+    // eigenes Ziel: ein langsam wandernder Versatz um die Hauptkugel (jeder Begleiter anders)
+    const wa = c.phase + time * c.wanderSpeed + Math.sin(time * 0.31 + c.phase * 3) * 1.2;
+    const tx = ball.pos[0] + Math.cos(wa) * c.wander, tz = ball.pos[2] + Math.sin(wa) * c.wander;
+    const dx = tx - c.pos[0], dz = tz - c.pos[2];
     const d = Math.hypot(dx, dz) || 1e-4;
-    const gap = Math.max(d - (R + RC), 0);
-    const pull = S.fdMagnet * gap * (1 + 0.35 * gap);           // stärker, je weiter weg
-    const near = Math.exp(-gap * 2.5);                            // nahe dran: mehr Bremsen
+    const gap = Math.max(d - (R + c.r) * 0.6, 0);
+    const pull = S.fdMagnet * c.magnet * gap * (1 + 0.35 * gap); // stärker, je weiter weg
+    const near = Math.exp(-gap * 2.5) * c.brake;                  // nahe dran: mehr Bremsen
     const rvx = c.vel[0] - ball.vel[0], rvz = c.vel[1] - ball.vel[1];
     const [cgx, cgz] = terrainGrad(c.pos[0], c.pos[2]);
     const slope = (5 / 7) * G * 0.6;
-    c.vel[0] += (dx / d * pull - rvx * (0.4 + 2.6 * near) - slope * cgx) * dt;
-    c.vel[1] += (dz / d * pull - rvz * (0.4 + 2.6 * near) - slope * cgz) * dt;
+    // kleines Eigenleben: seitliches Schlingern
+    const jx = Math.sin(time * c.jit[0] + c.phase) * c.jit[2], jz = Math.cos(time * c.jit[1] + c.phase * 2) * c.jit[2];
+    c.vel[0] += (dx / d * pull - rvx * (0.4 + 2.6 * near) - slope * cgx + jx) * dt;
+    c.vel[1] += (dz / d * pull - rvz * (0.4 + 2.6 * near) - slope * cgz + jz) * dt;
     c.pos[0] += c.vel[0] * dt;
     c.pos[2] += c.vel[1] * dt;
   });
   // Kollisionen: Begleiter ↔ Hauptkugel (nur wenn sie unten ist) und untereinander, weich mit wenig Rückprall
-  const bodies = [{ pos: ball.pos, vel: ball.vel, r: R, main: true }, ...companions.map((c) => ({ pos: c.pos, vel: c.vel, r: RC, c }))];
+  const bodies = [{ pos: ball.pos, vel: ball.vel, r: R, main: true }, ...companions.filter((c) => !c.dying).map((c) => ({ pos: c.pos, vel: c.vel, r: c.r, c }))];
   for (let a = 0; a < bodies.length; a++) for (let b = a + 1; b < bodies.length; b++) {
     const A = bodies[a], B = bodies[b];
     if (!B.c) continue;
@@ -488,8 +494,8 @@ function updateGoals(dt) {
       if (A.main && -vn > 0.12 && time - (B.c.lastSpark || 0) > 0.15) {
         B.c.lastSpark = time;
         const cp = [A.pos[0] + nx * A.r, 0, A.pos[2] + nz * A.r];
-        cp[1] = terrainH(cp[0], cp[2]) + RC;
-        sparkChips(cp, [nx, nz], Math.min(-vn / 2, 1));
+        cp[1] = terrainH(cp[0], cp[2]) + B.r;
+        sparkChips(cp, [nx, nz], Math.min(-vn / 2, 1), B.c.hue);
       }
       if (-vn > 0.25 && sound && time - (B.c.lastClick || 0) > 0.12) {
         B.c.lastClick = time;
@@ -497,12 +503,21 @@ function updateGoals(dt) {
       }
     }
   }
+  for (let k = companions.length - 1; k >= 0; k--) {
+    const c = companions[k];
+    // Verschwinden (ältester bei mehr als MAX_COMPANIONS): klein skalieren, Licht ausblenden
+    if (c.dying) { c.scale -= dt / 1.2; if (c.scale <= 0) { companions.splice(k, 1); continue; } }
+    // Schnurr-Vibration: Größe und Helligkeit wackeln leicht (schnelles Zittern × langsames Atmen)
+    const purr = Math.sin(time * c.buzz) * (0.6 + 0.4 * Math.sin(time * c.breath + c.phase));
+    c.vis = c.scale * (1 + 0.035 * purr);
+    c.glow = c.bright * (1 + 0.12 * purr) * c.scale;
+  }
   companions.forEach((c, k) => {
-    c.pos[1] = terrainH(c.pos[0], c.pos[2]) + RC;
+    c.pos[1] = terrainH(c.pos[0], c.pos[2]) + c.r * c.scale;
     const step = [c.vel[0] * dt, 0, c.vel[1] * dt];
     const d = Math.hypot(step[0], step[2]);
     if (d > 1e-5) {
-      c.rot = mul3(axisAngle3(v3.norm(v3.cross([0, 1, 0], step)), d / RC), c.rot);
+      c.rot = mul3(axisAngle3(v3.norm(v3.cross([0, 1, 0], step)), d / c.r), c.rot);
       if (((time * 60) | 0) % 90 === k) c.rot = orthonormalize3(c.rot);
     }
     if (sound) sound.movePurr(c.id, c.pos);
@@ -510,22 +525,39 @@ function updateGoals(dt) {
 }
 
 function spawnCompanion(p) {
-  const c = { id: companionId++, pos: [p[0], terrainH(p[0], p[2]) + RC, p[2]], vel: [0, 0], phase: Math.random() * 6.28, rot: IDENT3() };
+  const rr = (a, b) => a + Math.random() * (b - a);
+  const r = RC * rr(0.75, 1.3);
+  const c = {
+    id: companionId++, pos: [p[0], terrainH(p[0], p[2]) + r, p[2]], vel: [0, 0], phase: Math.random() * 6.28, rot: IDENT3(),
+    r, hue: rr(-0.2, 0.55), bright: rr(0.7, 1.3),                      // Größe, Farbton (relativ zur Szene), Helligkeit
+    magnet: rr(0.6, 1.4), brake: rr(0.6, 1.4),                        // Bewegung: Zug und Bremsen
+    wander: rr(0.3, 1.1), wanderSpeed: rr(0.15, 0.6) * (Math.random() < 0.5 ? -1 : 1),
+    jit: [rr(0.4, 1.3), rr(0.4, 1.3), rr(0.3, 1.2)],                    // Schlingern: Tempo x/z, Stärke
+    buzz: rr(55, 80), breath: rr(2.5, 4.0),                           // Vibration (rad/s)
+    scale: 1, vis: 1, glow: 1, dying: false,
+  };
   companions.push(c);
   if (sound) sound.addPurr(c.id);
+  // höchstens MAX_COMPANIONS gleichzeitig: der älteste verschwindet (schrumpft, Licht aus, Schnurren aus)
+  const alive = companions.filter((x) => !x.dying);
+  for (const old of alive.slice(0, Math.max(alive.length - MAX_COMPANIONS, 0))) {
+    old.dying = true;
+    if (sound) sound.removePurr(old.id);
+  }
 }
 
+// Goal eingesammelt: Partikel im Look des Pfads, fliegen auf, prallen am Boden ab und bleiben liegen
 function explode(p, h) {
-  for (let i = 0; i < 140; i++) {
-    let d = [Math.random() - 0.5, Math.random() - 0.3, Math.random() - 0.5];
-    d = v3.scale(v3.norm(d), 1.2 + Math.random() * 2.6);
-    burstList.push({ p: [...p], v: d, birth: time, life: 1.2 + Math.random() * 1.2, hue: h, seed: Math.random() });
+  for (let i = 0; i < 160; i++) {
+    let d = [Math.random() - 0.5, Math.random() * 0.8, Math.random() - 0.5];
+    d = v3.scale(v3.norm(d), 0.8 + Math.random() * 2.2);
+    chipList.push({ p: [...p], v: d, birth: time, life: 5 + Math.random() * 5, hue: h, seed: Math.random(), landed: false });
   }
-  if (burstList.length > bursts.capacity) burstList.splice(0, burstList.length - bursts.capacity);
+  if (chipList.length > chips.capacity) chipList.splice(0, chipList.length - chips.capacity);
 }
 
 // Kleine helle Splitter am Kontaktpunkt: springen seitlich/aufwärts weg, landen und glimmen kurz am Boden
-function sparkChips(p, n, strength) {
+function sparkChips(p, n, strength, hOff = 0.25) {
   if (S.fdSparks <= 0) return;
   const count = Math.round((6 + 22 * strength) * S.fdSparks);
   for (let i = 0; i < count; i++) {
@@ -533,7 +565,7 @@ function sparkChips(p, n, strength) {
     const side = Math.random() < 0.5 ? 1 : -1;
     const sp = (0.4 + Math.random() * 1.1) * (0.5 + strength);
     const v = [Math.cos(a + (side < 0 ? Math.PI : 0)) * sp, 0.6 + Math.random() * 1.4 * (0.5 + strength), Math.sin(a + (side < 0 ? Math.PI : 0)) * sp];
-    chipList.push({ p: [...p], v, birth: time, life: 2.2 + Math.random() * 2.0, hue: hue + 0.12 * (Math.random() - 0.5), seed: Math.random(), landed: false });
+    chipList.push({ p: [...p], v, birth: time, life: 3 + Math.random() * 3, hue: hue + hOff * (Math.random() < 0.5 ? 1 : 0), seed: Math.random(), landed: false });
   }
   if (chipList.length > chips.capacity) chipList.splice(0, chipList.length - chips.capacity);
 }
@@ -548,7 +580,7 @@ function updateChips(dt) {
     c.p = v3.add(c.p, v3.scale(c.v, dt));
     const g = terrainH(c.p[0], c.p[2]) + 0.012;
     if (c.p[1] <= g) {
-      if (c.v[1] < -1.2 && !c.bounced) { c.v = [c.v[0] * 0.4, -c.v[1] * 0.25, c.v[2] * 0.4]; c.bounced = true; c.p[1] = g; }
+      if (c.v[1] < -0.5 && (c.bounces || 0) < 2) { c.v = [c.v[0] * 0.45, -c.v[1] * 0.3, c.v[2] * 0.45]; c.bounces = (c.bounces || 0) + 1; c.p[1] = g; }
       else { c.p[1] = g; c.landed = true; }
     }
   }
@@ -630,9 +662,9 @@ function uploadGlows() {
   const d = glowBuf.data;
   let k = 0;
   for (const g of goals) {
-    const y = terrainH(g.x, g.z) + 0.8 + 0.15 * Math.sin(time * 1.5 + g.phase);
+    const y = terrainH(g.x, g.z) + R + 0.04 * Math.sin(time * 1.5 + g.phase);
     const pulse = 0.8 + 0.3 * Math.sin(time * 2.2 + g.phase);
-    d.set([g.x, y, g.z, g.companion ? 0.9 : 0.7, hue + g.hue, pulse * 0.7, 0.35], k * 7); k++;
+    d.set([g.x, y, g.z, g.companion ? 0.6 : 0.45, hue + g.hue, pulse * 0.7, 0.35], k * 7); k++;
   }
   gl.bindBuffer(gl.ARRAY_BUFFER, glowBuf.buf);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, d, 0, k * 7);
@@ -656,8 +688,8 @@ function lightUniforms(u) {
   let n = 1;
   for (const c of companions) {
     if (n >= MAX_LIGHTS) break;
-    pos.set([c.pos[0], c.pos[1] - RC * 0.75, c.pos[2]], n * 3);
-    col.set(hueRGB(GLOW, hue + 0.25).map((x) => x * 0.22), n * 3);
+    pos.set([c.pos[0], c.pos[1] - c.r * c.vis * 0.75, c.pos[2]], n * 3);
+    col.set(hueRGB(GLOW, hue + c.hue).map((x) => x * 0.22 * c.glow * (c.r / RC)), n * 3);
     n++;
   }
   gl.uniform1i(u.uLightCount, n);
@@ -727,8 +759,11 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     gl.uniformMatrix4fv(u.uProj, false, proj);
     gl.uniformMatrix4fv(u.uView, false, view);
     gl.uniform3fv(u.uCam, cam);
-    gl.uniform1f(u.uHue, hue + 0.25);
-    for (const c of companions) drawSphere(u, c.pos, RC, c.rot);
+    for (const c of companions) {
+      gl.uniform1f(u.uHue, hue + c.hue);
+      gl.uniform1f(u.uBright, c.glow);
+      drawSphere(u, c.pos, c.r * c.vis, c.rot);
+    }
   }
   // Hauptkugel: Glasmurmel (im Shader verfolgt, deckend -> keine Sortierprobleme)
   u = P.ball.u;
@@ -796,11 +831,11 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     gl.bindVertexArray(bursts.vao);
     gl.drawArrays(gl.POINTS, 0, burstList.length);
   }
-  if (chipList.length) {
-    gl.uniform1f(u.uSize, 0.02);
+  if (chipList.length) {   // Goal- und Kollisions-Partikel: gleicher Look wie der Pfad
+    gl.uniform1f(u.uSize, 0.011);
     gl.uniform1f(u.uRise, 0);
-    gl.uniform1f(u.uBright, 2.2);
-    gl.uniform1f(u.uGlitter, 0);
+    gl.uniform1f(u.uBright, 0.85);
+    gl.uniform1f(u.uGlitter, 1);
     gl.bindVertexArray(chips.vao);
     gl.drawArrays(gl.POINTS, 0, chipList.length);
   }

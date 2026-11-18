@@ -50,7 +50,7 @@ export class FlowAudio {
   setVolumes(v) {
     Object.assign(this.volumes, v);
     const t = this.ctx.currentTime;
-    for (const e of this.purrs.values()) if (!e.fading) e.vol.gain.setTargetAtTime(this.volumes.purr * 0.9, t, 0.3);
+    for (const e of this.purrs.values()) e.vol.gain.setTargetAtTime(this.volumes.purr * 0.9, t, 0.3);
   }
 
   // Binaurale Quelle im Raum (HRTF); Hörer = Kopf (siehe listener())
@@ -183,31 +183,25 @@ export class FlowAudio {
     src.connect(hp).connect(lp).connect(am).connect(breathGain).connect(vol).connect(panner).connect(this.master);
     vol.gain.setTargetAtTime(this.volumes.purr * 0.9, ctx.currentTime, 1.5);   // sanft einblenden
     src.start(); buzz.start(); breath.start();
-    this.purrs.set(id, { panner, vol, nodes: [src, buzz, breath], born: ctx.currentTime, fading: false, frame: 0 });
-    this.limitPurrs();
+    this.purrs.set(id, { panner, vol, nodes: [src, buzz, breath], frame: 0 });
   }
 
-  // Viele HRTF-Quellen gleichzeitig überlasten den Audio-Thread (Knacken):
-  // nur die neuesten MAX_PURRS schnurren, ältere blenden langsam aus und werden danach abgebaut.
-  limitPurrs(max = 4) {
-    const active = [...this.purrs.entries()].filter(([, e]) => !e.fading).sort((a, b) => b[1].born - a[1].born);
+  // Schnurren einer Begleitkugel ausblenden und Knoten danach vollständig abbauen
+  removePurr(id) {
+    const e = this.purrs.get(id);
+    if (!e) return;
+    this.purrs.delete(id);
     const t = this.ctx.currentTime;
-    for (const [id, e] of active.slice(max)) {
-      e.fading = true;
-      e.vol.gain.cancelScheduledValues(t);
-      e.vol.gain.setValueAtTime(e.vol.gain.value, t);
-      e.vol.gain.setTargetAtTime(0, t, 1.2);           // ~4 s weich aus
-      for (const n of e.nodes) n.stop(t + 6);
-      setTimeout(() => {
-        try { e.panner.disconnect(); } catch {}
-        if (this.purrs.get(id) === e) this.purrs.delete(id);
-      }, 6500);
-    }
+    e.vol.gain.cancelScheduledValues(t);
+    e.vol.gain.setValueAtTime(e.vol.gain.value, t);
+    e.vol.gain.setTargetAtTime(0, t, 0.3);
+    for (const n of e.nodes) n.stop(t + 1.6);
+    setTimeout(() => { try { e.panner.disconnect(); } catch {} }, 2000);
   }
 
   movePurr(id, p) {
     const e = this.purrs.get(id);
-    if (!e || e.fading) return;
+    if (!e) return;
     if (e.frame++ % 3) return;                        // Position nur ~25×/s nachführen (weniger Automations-Ereignisse)
     const t = this.ctx.currentTime;
     e.panner.positionX.setTargetAtTime(p[0], t, 0.06);

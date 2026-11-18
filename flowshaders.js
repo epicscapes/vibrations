@@ -348,6 +348,7 @@ export const compFS = `#version 300 es
 precision highp float;
 uniform vec3 uCam;
 uniform float uHue;
+uniform float uBright;   // Helligkeit je Begleiter (inkl. Schnurr-Vibration)
 in vec3 vObj;
 in vec3 vN;
 in vec3 vWorld;
@@ -361,7 +362,7 @@ void main() {
   if (nv < 0.0) discard;
   vec3 rim = hueShift(GLOW, uHue) * 0.75;
   vec3 core = hueShift(vec3(0.82, 0.68, 1.0), uHue) * 1.25;
-  o = vec4(mix(rim, core, pow(nv, 0.9)) * (0.85 + 0.15 * nv), 1.0);
+  o = vec4(mix(rim, core, pow(nv, 0.9)) * (0.85 + 0.15 * nv) * uBright, 1.0);
 }`;
 
 // ---------- Funken: schimmernder Pfad und Explosionen ----------
