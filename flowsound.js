@@ -43,6 +43,7 @@ export class FlowAudio {
     this.noise = noiseBuffer(ctx);
     this.volumes = { roll: 0.8, music: 0.7, sfx: 0.8, purr: 0.8 };
     this._initRoll();
+    this._initWings();
     this._initMusic();
     this.purrs = new Map();
   }
@@ -99,6 +100,41 @@ export class FlowAudio {
     this.rollBP.frequency.setTargetAtTime(500 + s * 1400, now, 0.1);
     this.rollLP.frequency.setTargetAtTime(110 + s * 180, now, 0.1);
     this.rollLFO.frequency.setTargetAtTime(Math.max(speed / (2 * Math.PI * radius), 0.5), now, 0.1);
+  }
+
+  // ---------- Kolibri-Flügelschlag: weiches Brummen an der Kugel (binaural) ----------
+  // Flügelfrequenz (~45 Hz) als Grundton + luftiges Rauschen, das im Schlagtakt pulsiert.
+  _initWings() {
+    const ctx = this.ctx, g = this.g;
+    const osc = ctx.createOscillator(); osc.type = 'triangle'; osc.frequency.value = 46;
+    const oscLP = ctx.createBiquadFilter(); oscLP.type = 'lowpass'; oscLP.frequency.value = 260;
+    const src = ctx.createBufferSource(); src.buffer = this.noise; src.loop = true;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 420; bp.Q.value = 0.9;
+    const am = g(0.5);
+    const beat = ctx.createOscillator(); beat.frequency.value = 46;      // Luftstöße im Schlagtakt
+    beat.connect(g(0.5)).connect(am.gain);
+    const mix = g(1);
+    osc.connect(oscLP).connect(g(0.55)).connect(mix);
+    src.connect(bp).connect(am).connect(g(0.8)).connect(mix);
+    this.wingGain = g(0);
+    this.wingPan = this._panner(null, 1.0);
+    mix.connect(this.wingGain).connect(this.wingPan).connect(this.master);
+    osc.start(); src.start(); beat.start();
+    this.wingOsc = osc; this.wingBeat = beat;
+    this.wingFrame = 0;
+  }
+
+  // open = 0..1 (Flügel offen), pos = Kugelmitte
+  wings(open, pos) {
+    const now = this.ctx.currentTime;
+    if (this.wingFrame++ % 2) return;
+    this.wingGain.gain.setTargetAtTime(this.volumes.sfx * 0.32 * open, now, 0.12);
+    if (open > 0.01) {
+      const f = 40 + 8 * open + 3 * Math.sin(now * 1.7);                  // leicht schwankend wie ein echter Kolibri
+      this.wingOsc.frequency.setTargetAtTime(f, now, 0.1);
+      this.wingBeat.frequency.setTargetAtTime(f, now, 0.1);
+      this._place(this.wingPan, pos, 0.06);
+    }
   }
 
   // ---------- Goal eingesammelt: weiche Glocke (pentatonisch) ----------

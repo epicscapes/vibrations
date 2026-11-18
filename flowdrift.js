@@ -2,7 +2,7 @@
 // Vanilla WebGL2 + WebXR. Teilt Stimmerkennung/-effekte (audio.js) und VR-Menü (vrmenu.js) mit Soothing Ripples.
 import {
   skyVS, skyFS, terrainVS, terrainFS, ballVS, ballFS, sparkVS, sparkFS,
-  ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS, wingVS, wingFS, WING_FEATHERS, MAX_LIGHTS, compFS, shaftVS, shaftFS,
+  ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS, wingVS, wingFS, WING_FEATHERS, MAX_LIGHTS, compFS, shaftVS, shaftFS, moteVS, moteFS,
 } from './flowshaders.js';
 import { Bloom } from './flowpost.js';
 import { FlowAudio } from './flowsound.js';
@@ -47,6 +47,7 @@ const SECTIONS = [
     fdGoals:     { label: 'Goals', min: 5, max: 80, step: 1, def: 30 },
     fdCompanion: { label: 'Companion chance', min: 0, max: 1, step: 0.05, def: 0.35 },
     fdMagnet:    { label: 'Companion magnet', min: 0.5, max: 8, step: 0.25, def: 2.5 },
+    fdCompBright: { label: 'Companion brightness', min: 0.2, max: 2.5, step: 0.05, def: 1 },
   }},
   { title: 'Camera', items: {
     fdCam:  { label: 'POV ↔ third person', min: 0, max: 1, step: 0.01, def: 0.75 },
@@ -76,6 +77,7 @@ const SECTIONS = [
     fdFresnel:   { label: 'Ground fresnel', min: 0, max: 1, step: 0.05, def: 0.4 },
     fdSpecRough: { label: 'Light highlight roughness', min: 0, max: 1, step: 0.05, def: 0.5 },
     fdSparks:    { label: 'Collision sparks', min: 0, max: 2, step: 0.05, def: 1 },
+    fdMotes:     { label: 'Ambient sparkles', min: 0, max: 2, step: 0.05, def: 1 },
   }},
   { title: 'Atmosphere', items: {
     fdAuroraInt: { label: 'Aurora sky', min: 0, max: 2, step: 0.05, def: 1 },
@@ -117,7 +119,7 @@ const ui = {
   preview: document.getElementById('preview'),
 };
 ui.version.textContent = `Vibrations ${VERSION} · Flow Drift`;
-ui.status.textContent = 'Hold / W = hum · A/D = turn view · ←/→ = steer · Space = jump · F = wings';
+ui.status.textContent = 'Hold / W = hum · S = brake · A/D = turn view · ←/→ = steer · Space = jump · F = wings';
 
 // ---------- WebGL2 ----------
 const canvas = document.getElementById('c');
@@ -147,7 +149,7 @@ const P = {
   sky: program(skyVS, skyFS), terrain: program(terrainVS, terrainFS), ball: program(ballVS, ballFS),
   spark: program(sparkVS, sparkFS), ring: program(ringVS, ringFS), ribbon: program(ribbonVS, ribbonFS),
   glow: program(glowVS, glowFS), wing: program(wingVS, wingFS), comp: program(ballVS, compFS),
-  shaft: program(shaftVS, shaftFS),
+  shaft: program(shaftVS, shaftFS), mote: program(moteVS, moteFS),
 };
 const emptyVao = gl.createVertexArray();
 
@@ -213,7 +215,7 @@ let moveDir = [0, -1];            // aktuelle Fahrtrichtung (xz)
 let headFwd = [0, -1];            // Blickrichtung (xz, Welt)
 let manualHum = false;
 const keys = new Set();
-let stick = [0, 0], turn = 0, trigger = 0;
+let stick = [0, 0], turn = 0, trigger = 0, grip = 0;   // grip = Bremse (Grip-Tasten)
 const IDENT3 = () => new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 
 // Zufall mit Saat (Goals sollen bei jedem Start gleich verteilt sein)
@@ -229,6 +231,9 @@ const bursts = pointBuffer(3000);
 const burstList = [];
 const chips = pointBuffer(4000);   // Kollisions-Splitter: fliegen weg, bleiben kurz am Boden liegen
 const chipList = [];
+const motes = pointBuffer(1200);   // aufsteigende Glitzer-Partikel der Begleiter
+let moteHead = 0;
+const moteDirty = [];
 // Goals & Begleiter
 const glowBuf = pointBuffer(256);
 let goals = [];
@@ -278,7 +283,8 @@ function update(dt) {
   time += dt;
   hum.update();
   const keyHum = keys.has('w') || keys.has('arrowup');
-  const goal = Math.max(hum.level, manualHum || keyHum ? 0.7 : 0, trigger * 0.8);
+  const brake = Math.max(grip, keys.has('s') ? 1 : 0);
+  const goal = Math.max(hum.level, manualHum || keyHum ? 0.7 : 0, trigger * 0.8) * (1 - brake);
   propel += (goal - propel) * Math.min(dt * 6, 1);
 
   // Farbton nach Stimmfrequenz; ohne Summen langsam zurück zur Grundfarbe
@@ -307,13 +313,14 @@ function update(dt) {
 
   // Physik: Hangabtrieb (rollende Kugel: 5/7 g, nur am Boden), Antrieb, Reibung
   const [gx, gz] = terrainGrad(ball.pos[0], ball.pos[2]);
-  const slope = (5 / 7) * G * 0.6 * grounded;
+  const slope = (5 / 7) * G * 0.6 * grounded * (1 - brake);   // gebremst: rollt auch am Hang nicht weiter
   const ax = -slope * gx + dir[0] * propel * S.fdThrust;
   const az = -slope * gz + dir[1] * propel * S.fdThrust;
   ball.vel[0] += ax * dt; ball.vel[1] += az * dt;
-  const damp = Math.exp(-S.fdFriction * dt);
+  const damp = Math.exp(-(S.fdFriction + brake * 1.6) * dt);          // Bremse: sanft, aber bestimmt
   ball.vel[0] *= damp; ball.vel[1] *= damp;
   let speed = Math.hypot(ball.vel[0], ball.vel[1]);
+  if (brake > 0.5 && speed < 0.06) { ball.vel[0] = ball.vel[1] = 0; speed = 0; }
   if (speed > S.fdMaxSpeed) { ball.vel[0] *= S.fdMaxSpeed / speed; ball.vel[1] *= S.fdMaxSpeed / speed; speed = S.fdMaxSpeed; }
   const prev = [...ball.pos];
   ball.pos[0] += ball.vel[0] * dt;
@@ -345,10 +352,12 @@ function update(dt) {
   updateGoals(dt);
   updateBursts(dt);
   updateChips(dt);
+  emitMotes(dt);
 
   if (sound) {
     sound.resume();
     sound.roll(speed, R, [ball.pos[0], ball.pos[1] - R, ball.pos[2]], grounded);
+    sound.wings(wing, ball.pos);
     sound.music(speed);
   }
   if (fx) fx.update(hum.level, hum.pitch, hum.rms);
@@ -370,7 +379,7 @@ function updateVertical(dt) {
   // Schweben: Feder zu einer Höhe über dem geglätteten Boden, sanftes Auf und Ab
   let acc = -G * (1 - wing);
   if (wing > 0.02) {
-    const target = Math.max(groundSmooth + R + wing * (1.1 + 0.18 * Math.sin(time * 0.9)) + 0.07 * Math.sin(time * 2.3) * wing, floor + 0.15 * wing);
+    const target = Math.max(groundSmooth + R + wing * (1.7 + 0.2 * Math.sin(time * 0.9)) + 0.07 * Math.sin(time * 2.3) * wing, floor + 0.15 * wing);
     acc += ((target - ball.pos[1]) * 6 - ball.vy * 2.6) * wing;
   }
   ball.vy += acc * dt;
@@ -402,7 +411,8 @@ function emitTrail(dist) {
   }
 }
 
-function uploadTrail() {
+function uploadTrail() { uploadRing(trail, trailDirty); uploadRing(motes, moteDirty); }
+function uploadRing(trail, trailDirty) {
   if (!trailDirty.length) return;
   gl.bindBuffer(gl.ARRAY_BUFFER, trail.buf);
   // zusammenhängende Bereiche hochladen (Ringpuffer kann umbrechen)
@@ -557,6 +567,23 @@ function explode(p, h) {
 }
 
 // Kleine helle Splitter am Kontaktpunkt: springen seitlich/aufwärts weg, landen und glimmen kurz am Boden
+function emitMotes(dt) {
+  if (S.fdMotes <= 0) return;
+  for (const c of companions) {
+    c.moteAcc = (c.moteAcc || 0) + dt * 7 * S.fdMotes * c.scale;
+    while (c.moteAcc >= 1) {
+      c.moteAcc -= 1;
+      const u = Math.random() * 2 - 1, a = Math.random() * Math.PI * 2, q = Math.sqrt(1 - u * u);
+      const rr = c.r * c.vis * 1.05;
+      const i = moteHead * 7, d = motes.data;
+      d.set([c.pos[0] + q * Math.cos(a) * rr, c.pos[1] + Math.abs(u) * rr, c.pos[2] + q * Math.sin(a) * rr,
+             time, 1.8 + Math.random() * 1.6, hue + c.hue, Math.random()], i);
+      moteDirty.push(moteHead);
+      moteHead = (moteHead + 1) % motes.capacity;
+    }
+  }
+}
+
 function sparkChips(p, n, strength, hOff = 0.25) {
   if (S.fdSparks <= 0) return;
   const count = Math.round((6 + 22 * strength) * S.fdSparks);
@@ -689,7 +716,7 @@ function lightUniforms(u) {
   for (const c of companions) {
     if (n >= MAX_LIGHTS) break;
     pos.set([c.pos[0], c.pos[1] - c.r * c.vis * 0.75, c.pos[2]], n * 3);
-    col.set(hueRGB(GLOW, hue + c.hue).map((x) => x * 0.22 * c.glow * (c.r / RC)), n * 3);
+    col.set(hueRGB(GLOW, hue + c.hue).map((x) => x * 0.22 * c.glow * S.fdCompBright * (c.r / RC)), n * 3);
     n++;
   }
   gl.uniform1i(u.uLightCount, n);
@@ -761,7 +788,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     gl.uniform3fv(u.uCam, cam);
     for (const c of companions) {
       gl.uniform1f(u.uHue, hue + c.hue);
-      gl.uniform1f(u.uBright, c.glow);
+      gl.uniform1f(u.uBright, c.glow * S.fdCompBright);
       drawSphere(u, c.pos, c.r * c.vis, c.rot);
     }
   }
@@ -831,6 +858,15 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     gl.bindVertexArray(bursts.vao);
     gl.drawArrays(gl.POINTS, 0, burstList.length);
   }
+  // Glitzer der Begleiter: steigen langsam auf, wenig Deckkraft
+  if (S.fdMotes > 0) {
+    gl.uniform1f(u.uSize, 0.011);
+    gl.uniform1f(u.uRise, 0.22);
+    gl.uniform1f(u.uBright, 0.45);
+    gl.uniform1f(u.uGlitter, 1);
+    gl.bindVertexArray(motes.vao);
+    gl.drawArrays(gl.POINTS, 0, motes.capacity);
+  }
   if (chipList.length) {   // Goal- und Kollisions-Partikel: gleicher Look wie der Pfad
     gl.uniform1f(u.uSize, 0.011);
     gl.uniform1f(u.uRise, 0);
@@ -838,6 +874,23 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     gl.uniform1f(u.uGlitter, 1);
     gl.bindVertexArray(chips.vao);
     gl.drawArrays(gl.POINTS, 0, chipList.length);
+  }
+
+  // Magische Umgebungspartikel: steigen in Kameranähe vom Boden auf (weltfest -> zeigen das Tempo)
+  if (S.fdMotes > 0) {
+    u = P.mote.u;
+    gl.useProgram(P.mote.p);
+    gl.uniformMatrix4fv(u.uProj, false, proj);
+    gl.uniformMatrix4fv(u.uView, false, view);
+    gl.uniform3fv(u.uCam, cam);
+    gl.uniform1f(u.uTime, time);
+    gl.uniform1f(u.uHue, hue);
+    gl.uniform1f(u.uBox, 14);
+    gl.uniform1f(u.uPxScale, pxScale);
+    gl.uniform1f(u.uSize, 0.012);
+    gl.uniform1f(u.uBright, 0.35 * Math.min(S.fdMotes, 1));
+    gl.bindVertexArray(emptyVao);
+    gl.drawArrays(gl.POINTS, 0, Math.round(650 * S.fdMotes));
   }
 
   // Goals
@@ -899,10 +952,11 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     gl.uniform3fv(u.uPos, ball.pos);
     gl.uniform3fv(u.uFwd, [moveDir[0], 0, moveDir[1]]);
     gl.uniform1f(u.uOpen, wing);
-    gl.uniform1f(u.uFlap, time * 2.4);
+    gl.uniform1f(u.uFlap, time * 80);          // ~13 Schläge/s (Kolibri)
     gl.uniform1f(u.uSpan, 0.75);
     gl.uniform1f(u.uRootR, R * 0.8);
-    gl.uniform3fv(u.uColor, hueRGB(GLOW, hue));
+    gl.uniform1f(u.uHue, hue);
+    gl.uniform1f(u.uTime, time);
     gl.bindVertexArray(emptyVao);
     gl.drawArrays(gl.TRIANGLES, 0, WING_FEATHERS * 2 * 6);
   }
@@ -1109,7 +1163,7 @@ async function startXR() {
   session.updateRenderState({ baseLayer: layer, depthNear: 0.05, depthFar: 200 });
   refSpace = await session.requestReferenceSpace('local');
   session.addEventListener('end', () => {
-    xrSession = null; lastT = 0; trigger = 0; stick = [0, 0]; turn = 0;
+    xrSession = null; lastT = 0; trigger = 0; grip = 0; stick = [0, 0]; turn = 0;
     if (previewOn) { previewRunning = true; requestAnimationFrame(previewFrame); }
   });
   session.requestAnimationFrame(xrFrame);
@@ -1130,13 +1184,14 @@ function xrFrame(t, frame) {
   const menuBusy = vrMenu.update(frame, refSpace, [hp.x, hp.y, hp.z]);
 
   // Controller: rechter Stick lenkt, linker Stick dreht die Ansicht, Trigger = Antrieb (Alternative zum Summen)
-  stick = [0, 0]; turn = 0; trigger = 0; jumpPressed = false;
+  stick = [0, 0]; turn = 0; trigger = 0; grip = 0; jumpPressed = false;
   const hands = {};
   for (const src of session.inputSources) {
     const gp = src.gamepad;
     if (!gp) continue;
     // Sprung: A/B (rechts) oder Y (links); X bleibt fürs Menü
     const b = gp.buttons;
+    if (b[1]) grip = Math.max(grip, b[1].pressed ? 1 : b[1].value);   // Grip (links oder rechts) = bremsen
     if (src.handedness === 'right' && ((b[4] && b[4].pressed) || (b[5] && b[5].pressed))) jumpPressed = true;
     if (src.handedness === 'left' && b[5] && b[5].pressed) jumpPressed = true;
     const gpose = frame.getPose(src.gripSpace || src.targetRaySpace, refSpace);

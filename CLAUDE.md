@@ -75,7 +75,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.19.0)
+## Flow Drift (Stand v0.20.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
   Himmel: Aurora-Schleier rundherum, keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
   Die Schleier sind parallel zur Lichtstrahl-Richtung `SHAFT_DIR` = normalize(0.35, 1, 0.15): Muster hängt nur vom Winkel um diese Achse ab
@@ -108,7 +108,8 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   (Die Mehrstrahl-Variante „Realistic rays“ aus v0.17 wurde auf Wunsch wieder entfernt.) Fresnel-Saum in Szenenfarbe (`fdBallFresnel`, 0–3).
 - Begleiter (Grundradius 0,12 m, je Kugel 0,75–1,3 ×): leuchtende Kugeln (innen hell Lavendel, zum Rand Glow-Farbton), keine Fraktale, kein Halo-Sprite.
   Jede Kugel ist individuell (Zufall beim Entstehen): Größe, Farbton-Versatz (−0,2…0,55), Helligkeit, Zug/Bremsen, eigener wandernder Zielpunkt um die Hauptkugel,
-  seitliches Schlingern. Schnurr-Vibration: Größe ±3,5 % und Helligkeit ±12 % zittern schnell, moduliert mit langsamem Atmen.
+  seitliches Schlingern. Helligkeit `fdCompBright`: gedimmt wird der weißliche Kern kleiner und die Farbe satter (kein Vergrauen), heller wächst der Kern.
+  Von jedem Begleiter steigen ständig ein paar glitzernde Partikel auf (Ringpuffer `motes`, ~7/s, wenig Deckkraft). Schnurr-Vibration: Größe ±3,5 % und Helligkeit ±12 % zittern schnell, moduliert mit langsamem Atmen.
   Höchstens 3 Begleiter (`MAX_COMPANIONS`, mehr erzeugte Audio-Knacken): kommt ein vierter dazu, schrumpft der älteste in 1,2 s weg, sein Licht blendet mit aus,
   sein Schnurren wird ausgeblendet und abgebaut (`removePurr`).
   Innenlichter (max. 9 Punktlichter `MAX_LIGHTS`) sitzen tief in den Kugeln (Hauptkugel 0,8 r, Begleiter 0,75 r unter der Mitte, dicht über dem Boden)
@@ -116,7 +117,10 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Rauheit des Glanzflecks `fdSpecRough` (Exponent 60 → 3, energieerhaltend, Reflexion zusätzlich per Noise gestreut).
 - Physik: Hangabtrieb nur am Boden (5/7 g × 0,6), Antrieb = Summen (alternativ Trigger / W / gedrückt halten) × Thrust, Reibung, Höchsttempo; Rollen über 3×3-Rotation.
   Sprung: A/B rechts oder Y links (X = Menü), Vorschau: Leertaste. Landung mit kleinem Rückprall + Aufprallklang.
-  Flügel: Arme ausbreiten (Hände > ~1,1 m auseinander, etwa Schulterhöhe; Vorschau: F halten) → Federfächer wachsen, Kugel schwebt ~1,1 m über dem
+  Bremsen: Grip links und/oder rechts (analog), Vorschau: S → kein Antrieb, kein Hangabtrieb, zusätzliche Dämpfung, unter 6 cm/s Stillstand.
+  Flügel: Arme ausbreiten (Hände > ~1,1 m auseinander, etwa Schulterhöhe; Vorschau: F halten) → Federfächer wachsen und schlagen schnell wie ein Kolibri
+  (~13 Schläge/s, Farbton läuft schnell über Federn und Länge → chromatisches Schillern, `wingFS`), Kolibri-Brummen an der Kugel (`wings()` in flowsound.js:
+  ~45 Hz Dreieck + im Schlagtakt pulsierendes Luftrauschen, binaural, Lautstärke = Goal-Sound-Regler). Kugel schwebt ~1,7 m über dem
   geglätteten Boden (Feder + sanftes Auf und Ab), folgt den Hügeln weich; in der Luft kein Hangabtrieb, kein Pfad, kein Rollgeräusch.
 - Begleiter-Physik: rollen immer am Boden, magnetisch zur Hauptkugel (Zug ∝ Abstand × (1 + 0,35·Abstand), `fdMagnet`), nahe dran Bremsen relativ zur Hauptkugel;
   unabhängig von Blick/Kamera. Weiche Kollisionen (Hauptkugel schwerer, Rückprall 0,25) mit leisem räumlichem Glas-Klicken.
@@ -126,6 +130,8 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Goals schweben auf Höhe der Kugelmitte (Gelände + R), Einsammeln bei Abstand < R + 0,12 m.
 - Richtung/Kamera: Blickrichtung + rechter Stick lenkt; linker Stick dreht die Ansicht um die Kugel. `fdCam` 0 = POV über der Kugel … 1 = Third Person.
   Weltansicht = XR-Ansicht × inverse(Rig); VR-Menü mit lokaler Ansicht.
+- Magische Umgebungspartikel (`fdMotes`, `moteVS/FS`): zustandslos, weltfest in einem 14-m-Bereich um die Kamera gewrappt (Rand ausgeblendet),
+  steigen über 5–11 s vom Boden bis ~2,6 m auf, glitzern, wenig Deckkraft → beim Durchfahren sichtbares Tempo.
 - Effekte: Partikelpfad (nur am Boden; kleine, scharfe Punkte, die glitzern: `uGlitter` → meist gedämpft, kurze helle Aufblitzer je Partikel), Warp-Ringe (starten klein, wachsen, dicht, dezent), Ribbon (blendet vor der Kamera aus), Goals, Explosionen, Flügel.
   Weiche Schnitte (`SOFT_GLSL`): Ribbon, Ringe, Leucht-Sprites und Flügel blenden analytisch aus, je näher sie Gelände (`terrainH`) oder Hauptkugel kommen
   (kein Tiefenpuffer nötig; Sprites rekonstruieren ihre Pixel-Weltposition über die Kamera-Achsen).

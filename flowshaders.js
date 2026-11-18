@@ -360,9 +360,16 @@ void main() {
   vec3 v = normalize(uCam - vWorld);
   float nv = dot(n, v);
   if (nv < 0.0) discard;
+  // Helligkeit ohne Vergrauen: gedimmt wird der weißliche Kern schwächer und die Farbe satter,
+  // heller wird der Kern größer (Licht statt grauer Abdunklung)
+  float b = uBright;
   vec3 rim = hueShift(GLOW, uHue) * 0.75;
   vec3 core = hueShift(vec3(0.82, 0.68, 1.0), uHue) * 1.25;
-  o = vec4(mix(rim, core, pow(nv, 0.9)) * (0.85 + 0.15 * nv) * uBright, 1.0);
+  float coreAmt = pow(nv, mix(2.5, 0.6, clamp(b * 0.5, 0.0, 1.0))) * clamp(0.35 + 0.65 * b, 0.0, 1.0);
+  vec3 c = mix(rim, core, coreAmt) * (0.85 + 0.15 * nv);
+  float l = dot(c, vec3(0.299, 0.587, 0.114));
+  c = max(mix(vec3(l), c, 1.0 + 0.6 * clamp(1.0 - b, 0.0, 1.0)), 0.0);   // Sättigung beim Dimmen anheben
+  o = vec4(c * b, 1.0);
 }`;
 
 // ---------- Funken: schimmernder Pfad und Explosionen ----------
@@ -535,7 +542,7 @@ void main() {
   vec3 right = normalize(cross(uFwd, up));
   // Federn fächern von vorne-oben nach hinten aus, Schlag läuft von innen nach außen
   float spread = mix(0.55, -0.35, fk);
-  float flap = sin(uFlap - fk * 0.6) * 0.35 * uOpen;
+  float flap = sin(uFlap - fk * 0.35) * 0.55 * uOpen;   // schneller Kolibri-Schlag, große Amplitude
   vec3 dir = normalize(right * side * cos(spread) + up * (sin(spread) * 0.5 + flap) - uFwd * fk * 0.6);
   float len = uSpan * uOpen * mix(1.0, 0.55, fk);
   vec3 width = normalize(cross(dir, up)) * 0.1 * uOpen * (1.0 - q.x * 0.6);
@@ -549,19 +556,24 @@ void main() {
 
 export const wingFS = `#version 300 es
 precision highp float;
-uniform vec3 uColor;
+uniform float uHue;
+uniform float uTime;
 uniform float uOpen;
 in vec2 vUv;
 in float vK;
 in vec3 vWorld;
 out vec4 o;
+${COLOR_GLSL}
+${BASE_GLSL}
 ${TERRAIN_GLSL}
 ${SOFT_GLSL}
 ${DITHER_GLSL}
 void main() {
   float edge = 1.0 - vUv.y * vUv.y;
   float a = edge * (0.35 + 0.65 * vUv.x) * (1.0 - vUv.x * 0.5) * uOpen * (0.6 + 0.4 * (1.0 - vK));
-  o = vec4(ditherAdd(uColor * a * 0.8 * softFade(vWorld, 0.12)), 1.0);
+  // chromatisch: Farbton läuft schnell über Federn und Länge (wie schillernde Kolibri-Federn)
+  vec3 col = hueShift(GLOW, uHue + uTime * 2.2 + vK * 2.4 + vUv.x * 1.3);
+  o = vec4(ditherAdd(col * a * 0.8 * softFade(vWorld, 0.12)), 1.0);
 }`;
 
 // ---------- Atmosphärische Lichtstrahlen (wie gestreute Planes in Unreal) ----------
@@ -697,4 +709,59 @@ void main() {
   vec3 s = texelFetch(uScene, ivec2(gl_FragCoord.xy), 0).rgb;
   vec3 b = texture(uBloom, clampUv(dstUv())).rgb;
   o = vec4(max(dither(s + b * uStrength), 0.0), 1.0);
+}`;
+
+// ---------- Magische Umgebungspartikel: steigen vom Boden auf, nur in Kameranähe ----------
+// Zustandslos: jede ID hat eine weltfeste Position in einem um die Kamera mitwandernden Würfel (Kachel-Wrap).
+// Weltfest -> beim Durchfahren ziehen sie vorbei und zeigen das Tempo. Am Würfelrand ausgeblendet (kein sichtbares Umspringen).
+export const moteVS = `#version 300 es
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform vec3 uCam;
+uniform float uTime;
+uniform float uHue;
+uniform float uBox;        // Kantenlänge des Bereichs (m)
+uniform float uPxScale;
+uniform float uSize;
+uniform float uBright;
+out float vA;
+out vec3 vCol;
+${COLOR_GLSL}
+${BASE_GLSL}
+${TERRAIN_GLSL}
+float h1(float n) { return fract(sin(n * 12.9898) * 43758.5453); }
+void main() {
+  float id = float(gl_VertexID);
+  vec3 r = vec3(h1(id + 0.1), h1(id + 7.3), h1(id + 3.7));
+  float r4 = h1(id + 11.9);
+  // xz weltfest, um die Kamera gewrappt
+  vec2 xz = uCam.xz + (fract(r.xy - uCam.xz / uBox) - 0.5) * uBox;
+  // langsamer Aufstieg vom Boden, eigene Phase und Tempo, leichtes Schweben seitlich
+  float cyc = 5.0 + 6.0 * r4;
+  float t = fract(uTime / cyc + r.z);
+  float rise = 2.6 * t * (0.6 + 0.4 * r.z);
+  xz += vec2(sin(uTime * 0.4 + id), cos(uTime * 0.33 + id * 1.7)) * 0.12 * t;
+  vec3 p = vec3(xz.x, terrainH(xz) + 0.02 + rise, xz.y);
+  vec4 vp = uView * vec4(p, 1.0);
+  gl_Position = uProj * vp;
+  gl_PointSize = clamp(uSize * (0.6 + 0.8 * r4) * uPxScale / max(-vp.z, 0.05), 1.5, 10.0);
+  float d = length(p - uCam);
+  float fade = sin(3.14159 * t)                                      // auf- und abblenden über den Zyklus
+             * (1.0 - smoothstep(uBox * 0.28, uBox * 0.46, length(xz - uCam.xz)))   // Rand des Bereichs
+             * smoothstep(0.3, 0.9, d);                              // nicht direkt vor dem Auge
+  float tw = 0.5 + 0.5 * sin(uTime * (1.5 + r4 * 5.0) + id);
+  tw = 0.3 + 2.0 * pow(tw, 10.0);                                     // Glitzern
+  vA = fade * tw * uBright;
+  vCol = hueShift(mix(GLOW, vec3(1.0, 0.85, 1.0), 0.35), uHue + (r.x - 0.5) * 0.3);
+}`;
+
+export const moteFS = `#version 300 es
+precision mediump float;
+in float vA;
+in vec3 vCol;
+out vec4 o;
+void main() {
+  float r = length(gl_PointCoord * 2.0 - 1.0);
+  float a = exp(-r * r * 9.0) * (1.0 - smoothstep(0.85, 1.0, r));
+  o = vec4(vCol * vA * a, 1.0);
 }`;
