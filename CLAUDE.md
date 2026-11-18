@@ -1,12 +1,20 @@
 # Vibrations – meditative WebXR-Anwendung
 
 ## Ziel
-Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Quest-Browser läuft (WebXR, keine App-Installation).
+**Vibrations** – eine Sammlung ruhiger, meditativer VR-Experiences für die **Meta Quest 3**, direkt im Quest-Browser (WebXR, keine App-Installation).
+Experiences (Auswahl per Thumbnail-Karten auf der Startseite, URL `?exp=<id>`):
+1. **Soothing Ripples** (`ripples`, Modul `main.js`) – Sonne/Fraktal hinter brechendem Wasser mit Cymatics.
+2. **Flow Drift** (`flow`, Modul `flowdrift.js`) – vom Summen angetriebene Kugel rollt durch Level-Landschaften.
+Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, Thumbnail unter `thumbs/`, 480×300 JPG) und neue Module in `MODULES` aufnehmen.
 
 ## Technik
 - **Vanilla WebGL2 + WebXR**, kein Framework (Wunsch des Nutzers: so lange wie sinnvoll ohne Framework).
   Framework erst vorschlagen, wenn z. B. glTF-Modelle, viele Objekte/Szenengraph, Controller-/Hand-Interaktion mit UI oder Physik dazukommen.
-- Reines HTML/JS ohne Build-Schritt: `index.html`, `main.js` (WebGL/XR-Setup, Loop, Einstellungen), `shaders.js` (GLSL), `audio.js` (Summen-Erkennung + Stimmeffekte), `grain-worklet.js` (AudioWorklet für Granular-Effekte), `vrmenu.js` (Menü in VR).
+- Reines HTML/JS ohne Build-Schritt. `index.html` = Startseite/Loader (Experience-Auswahl, Import-Map mit Versionen).
+  Gemeinsam: `audio.js` (Summen-Erkennung + Stimmeffekte, von allen Experiences genutzt), `grain-worklet.js`, `vrmenu.js` (VR-Menü), `mat.js` (Matrix-Helfer).
+  Soothing Ripples: `main.js`, `shaders.js`. Flow Drift: `flowdrift.js`, `flowshaders.js`, `flowsound.js`.
+  Jede Experience lädt als eigenes Modul (Seitenwechsel per Reload) – keine Aufräum-Logik zwischen Experiences nötig.
+- Einstellungen aller Experiences in localStorage (`set.<key>`); Stimm-Einstellungen (`volume`, `dry`, `gateThr`, `fx.*`) sind geteilt, Flow-Drift-Schlüssel beginnen mit `fd`.
 - Rendering: **Antialiasing aus**, **Supersampling 150 %** der nativen Quest-Auflösung
   (`framebufferScaleFactor = getNativeFramebufferScaleFactor() * 1.5`). Testweise änderbar per URL: `?scale=1.0`.
 - **Hosting: GitHub Pages** aus dem `main`-Branch (Root). HTTPS ist Pflicht für WebXR – Pages liefert das.
@@ -22,10 +30,11 @@ Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Qu
 
 ## Gestaltungsprinzipien
 - Ruhig, langsam, dunkel mit weichem Licht. Keine schnellen Bewegungen, nichts, was Übelkeit auslöst.
-- Nutzer steht/sitzt still; keine künstliche Fortbewegung.
+- Soothing Ripples: Nutzer steht/sitzt still, keine künstliche Fortbewegung.
+- Flow Drift: künstliche Fortbewegung (Kamera folgt der Kugel) auf ausdrücklichen Wunsch; Drehung fließend ohne Vignette (Nutzerwahl).
 - Performance: Quest 3 soll stabil 72–90 fps halten. Wenige Lichter, sparsame Partikel, keine Post-Processing-Ketten.
 
-## Aktueller Stand (v0.13.0) – Szene „Sonne & Wasser“
+## Soothing Ripples (Stand v0.14.0)
 - Look nach Referenz: Sonnenscheibe wie eine Projektion – in Ruhe tiefrot und gedämpft (untergehende afrikanische Sonne), beim Summen hell orange (`uSunHeat` folgt dem federnden Wachstum), schmaler chromatischer Rand (gelb → orange → rot), gesättigter roter Glow, dunkelroter Grund (Korn wurde entfernt).
 - Davor eine transparente, brechende Wasserebene (Quad 16 × 16 m, 5 m vor dem Nutzer, Behälter-Umkreisradius 3 m, Sonnenradius in Ruhe 1,15 m, Fraktal-Grundgröße 1,4 m). Die Sonne liegt 1 m dahinter und wird per Brechung im Shader verzerrt (inkl. Parallaxe).
 - Shapes (Untermenü): Objekt im Zentrum = Sonne oder Fraktal.
@@ -64,8 +73,26 @@ Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Qu
   Zeigt der Laser aufs Menü, erzeugt der rechte Trigger keine Wellen.
 - Controller (VR): beide Trigger analog = Wellenstärke (voll gedrückt = 1/3 der Summ-Maximalstärke, `TRIGGER_MAX`),
   Anregungsort = unsichtbarer Strahl der fester gedrückten Hand ∩ Wasserebene. (Relief und Trigger-Ton wurden auf Wunsch wieder entfernt.)
-- Browser-Vorschau: kleines abgerundetes Portal in der Mitte (Blickwinkel ~43°, `?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
+- Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
+
+## Flow Drift (Stand v0.14.0)
+- Level 1 „Rolling Hills“: unendliches Sinus-Hügel-Gelände (`terrainH` identisch in `flowshaders.js` TERRAIN_GLSL und `flowdrift.js` – beide gleich halten),
+  Gitter 180² über 110 m, mitwandernd und auf Zellen gerastet; Fresnel-Shader, feine Höhenlinien, Lichtpfütze unter der Kugel, Nebel, Himmel mit Horizont-Schimmer und Sternen.
+  Weitere Levels: Option `fdLevel` (bisher nur Level 1) – neue Level brauchen eigene Höhenfunktion in JS und GLSL.
+- Kugel (r = 0,3 m): Fresnel + stereografisch projizierte Julia-Muster auf der Oberfläche (drehen sich mit), Glanzpunkt.
+  Physik: Hangabtrieb (5/7 g × 0,6), Antrieb = Summen (alternativ Trigger, in der Vorschau W/gedrückt halten) × Thrust, Reibung, Höchsttempo; Rollen über 3×3-Rotation.
+- Richtung: Blickrichtung (Kopf, um Rig-Drehung gedreht); rechter Stick lenkt zusätzlich relativ zur Blickrichtung. Linker Stick dreht die Ansicht um die Kugel (fließend).
+- Kamera-Rig: Ursprung des XR-Raums folgt der Kugel weich. `fdCam` 0 = POV (direkt über der Kugel) … 1 = Third Person (3,2 m dahinter, 1,6 m hoch), stufenlos.
+  Weltansicht = XR-Ansicht × inverse(Rig). VR-Menü wird mit der lokalen Ansicht gezeichnet (hängt an der Hand, nicht an der Welt).
+- Effekte (Farbton nach Stimmfrequenz, ohne Summen langsam zurück): schimmernder Partikelpfad (Ringpuffer 30 000, Dichte pro Meter, Lebensdauer),
+  Warp-Ringe beim Antrieb (strahlen nach hinten), Ribbon-Schweif (zur Kamera gedrehtes Band, blendet vor der Kamera aus),
+  Goals (leuchtende Sprites, Einsammeln → Chime + Explosion, Ersatz-Goal weiter weg), Begleitkugeln aus manchen Goals (Federbewegung um die Kugel, max. 8).
+- Klang (`flowsound.js`, alles synthetisiert, je Klang eine Methode → später gegen Dateien tauschbar): Rollen (Rauschen + Holzresonanz, AM mit Drehfrequenz),
+  Chime (Glocke, pentatonisch), Schnurren je Begleiter (gefiltertes Rauschen mit ~25 Hz Brummen + Atmen, HRTF-PannerNode, Hörer = Kopf),
+  generative Musik (Flächen I–vi–ii–V + pentatonische Töne), lauter und heller mit Tempo. Stimmeffekte wie in Soothing Ripples.
+- Depth-Buffer an (XR-Layer `depth: true`), Reihenfolge: Himmel → Gelände → Kugel → additive Effekte (Tiefentest, ohne Tiefe schreiben).
+- Tests: `?debug=1` legt den Zustand als `window.__fd` offen.
 
 ## Entscheidungen
 - Keine Einbindung in epicscapes.de (Adobe Portfolio) vorerst.

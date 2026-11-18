@@ -76,7 +76,7 @@ void main() {
 }`;
 
 // ---------- Farbe: Hue-Shift (Rotation im YIQ-Farbraum, Helligkeit bleibt) ----------
-const COLOR_GLSL = `
+export const COLOR_GLSL = `
 vec3 hueShift(vec3 c, float a) {
   const mat3 toYIQ = mat3(0.299, 0.596, 0.211, 0.587, -0.274, -0.523, 0.114, -0.322, 0.312);
   const mat3 toRGB = mat3(1.0, 1.0, 1.0, 0.956, -0.272, -1.106, 0.621, -0.647, 1.703);

@@ -7,8 +7,8 @@
   <style>
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; color: #e8b48a; }
     /* Vorschau als kleines Portal in der Mitte */
-    canvas { position: fixed; left: 50%; top: 46%; transform: translate(-50%, -50%);
-             width: min(56vw, 56vh, 520px); height: min(56vw, 56vh, 520px);
+    canvas { position: fixed; left: 50%; top: 40%; transform: translate(-50%, -50%);
+             width: min(54vw, 50vh, 500px); height: min(54vw, 50vh, 500px);
              border-radius: 28px; display: block; touch-action: none;
              box-shadow: 0 0 0 1px #e8b48a33, 0 0 60px #ff5a1a22; }
     canvas.off { visibility: hidden; }
@@ -37,6 +37,15 @@
     .chips { display: flex; flex-wrap: wrap; gap: 6px; }
     .chip { padding: 6px 10px; border-radius: 16px; border: 1px solid #e8b48a44; background: #1a0805; user-select: none; }
     .chip input { accent-color: #f08a3a; vertical-align: -2px; }
+
+    /* Auswahl der Experiences: Karten mit Thumbnail */
+    #experiences { position: fixed; bottom: 82px; left: 0; right: 0; display: flex; gap: 12px; justify-content: center; z-index: 10; }
+    .exp { width: 150px; border-radius: 16px; overflow: hidden; border: 1px solid #e8b48a44; background: #140604e6;
+           color: #f3c79c; text-decoration: none; font-size: 13px; opacity: .7; transition: opacity .2s, border-color .2s; }
+    .exp:hover { opacity: 1; }
+    .exp.active { opacity: 1; border-color: #f08a3a; box-shadow: 0 0 24px #f08a3a33; }
+    .exp img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; background: #000; }
+    .exp span { display: block; padding: 7px 10px; }
   </style>
 </head>
 <body>
@@ -44,6 +53,7 @@
   <div id="version"></div>
   <div id="status">Hold to simulate humming</div>
   <div id="panel"></div>
+  <div id="experiences"></div>
   <div id="controls">
     <button id="toggle">⚙︎</button>
     <button id="preview">Enable preview</button>
@@ -53,17 +63,40 @@
   <!-- Version: nur hier hochzählen. Jede Version lädt ihre Dateien unter eigener Adresse (?v=…),
        damit der Quest-Browser nach dem Neuladen nicht alte Dateien aus dem Cache nimmt. -->
   <script>
-    const V = '0.13.1';
+    const V = '0.14.0';
     window.VIBRATIONS_VERSION = V;
+
+    // Experiences: neue hier eintragen (Modul + Thumbnail). Auswahl per ?exp=<id>.
+    const EXPERIENCES = [
+      { id: 'ripples', title: 'Soothing Ripples', module: 'main.js', thumb: 'thumbs/soothing-ripples.jpg' },
+      { id: 'flow', title: 'Flow Drift', module: 'flowdrift.js', thumb: 'thumbs/flow-drift.jpg' },
+    ];
+    const MODULES = ['main.js', 'shaders.js', 'audio.js', 'vrmenu.js', 'mat.js', 'flowdrift.js', 'flowshaders.js', 'flowsound.js'];
+
+    const params = new URLSearchParams(location.search);
+    const current = EXPERIENCES.find((e) => e.id === params.get('exp')) || EXPERIENCES[0];
+    document.title = 'Vibrations – ' + current.title;
+
+    const bar = document.getElementById('experiences');
+    for (const e of EXPERIENCES) {
+      const a = document.createElement('a');
+      a.className = 'exp' + (e === current ? ' active' : '');
+      const q = new URLSearchParams(location.search);
+      q.set('exp', e.id);
+      a.href = '?' + q.toString();
+      a.innerHTML = `<img alt="" src="${e.thumb}?v=${V}"><span>${e.title}</span>`;
+      bar.appendChild(a);
+    }
+
     const imports = {};
-    for (const f of ['main.js', 'shaders.js', 'audio.js', 'vrmenu.js']) imports['./' + f] = './' + f + '?v=' + V;
+    for (const f of MODULES) imports['./' + f] = './' + f + '?v=' + V;
     const map = document.createElement('script');
     map.type = 'importmap';
     map.textContent = JSON.stringify({ imports });
     document.currentScript.after(map);
     const mod = document.createElement('script');
     mod.type = 'module';
-    mod.src = './main.js?v=' + V;
+    mod.src = './' + current.module + '?v=' + V;
     map.after(mod);
   </script>
 </body>
