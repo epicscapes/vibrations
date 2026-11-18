@@ -1,7 +1,27 @@
 // Alle GLSL-Shader (WebGL2 / GLSL ES 3.00)
 
+// ---------- Behälterform (gemeinsam für Simulation, Glow und Sand) ----------
+const BOUNDARY_GLSL = `
+uniform float uR;       // Umkreisradius des Behälters (UV)
+uniform float uShape;   // 0 = Kreis, 3..8 = n-Eck, 100+n = Blüte mit n Blättern
+uniform float uLobe;    // Tiefe der Blütenblätter
+// Abstand vom Mittelpunkt zum Rand in Richtung th
+float boundary(float th) {
+  if (uShape < 0.5) return uR;
+  if (uShape > 99.0) return uR * (1.0 - uLobe * 0.5 * (1.0 + cos((uShape - 100.0) * th)));
+  float seg = 6.2831853 / uShape;
+  float a = mod(th - 1.5707963, seg) - seg * 0.5;   // eine Ecke zeigt nach oben
+  return uR * cos(3.14159265 / uShape) / cos(a);
+}
+// 1 im Inneren, weich auf 0 zum Rand hin (c = UV - 0.5)
+float edgeFade(vec2 c) {
+  float rb = boundary(atan(c.y, c.x));
+  return smoothstep(rb, rb * 0.72, length(c));
+}`;
+
 // ---------- Wellensimulation ----------
-// Zustand in einer RG16F-Textur: R = aktuelle Höhe, G = vorherige Höhe.
+// Zustand in einer RGBA16F-Textur: R = aktuelle Höhe, G = vorherige Höhe,
+// B = Hüllkurve (geglättete |Höhe|) -> zeigt Bäuche und Knoten des stehenden Musters (für Sand).
 // Diskrete 2D-Wellengleichung in einem Behälter mit festem Rand (h = 0)
 // -> Wellen werden an der Peripherie reflektiert und bilden stehende Muster (Cymatics).
 
@@ -21,31 +41,21 @@ uniform float uDamp;    // Dämpfung der Geschwindigkeit pro Schritt
 uniform float uDrive;   // aktuelle Anregung
 uniform vec2  uSrcPos;  // Ort der Anregung (UV), kann dem Blick folgen
 uniform float uSrc;     // Radius der Anregungsquelle (UV)
-uniform float uR;       // Umkreisradius des Behälters (UV)
-uniform float uShape;   // 0 = Kreis, 3..8 = n-Eck, 100+n = Blüte mit n Blättern
-uniform float uLobe;    // Tiefe der Blütenblätter
+uniform float uEnvK;    // Glättung der Hüllkurve pro Schritt
 in vec2 vUv;
 out vec4 o;
+${BOUNDARY_GLSL}
 
 float H(ivec2 p, ivec2 size) {
   p = clamp(p, ivec2(0), size - 1);
   return texelFetch(uState, p, 0).r;
 }
 
-// Abstand vom Mittelpunkt zum Rand in Richtung th
-float boundary(float th) {
-  if (uShape < 0.5) return uR;
-  if (uShape > 99.0) return uR * (1.0 - uLobe * 0.5 * (1.0 + cos((uShape - 100.0) * th)));
-  float seg = 6.2831853 / uShape;
-  float a = mod(th - 1.5707963, seg) - seg * 0.5;   // eine Ecke zeigt nach oben
-  return uR * cos(3.14159265 / uShape) / cos(a);
-}
-
 void main() {
   ivec2 size = textureSize(uState, 0);
   ivec2 p = ivec2(gl_FragCoord.xy);
-  vec2 s = texelFetch(uState, p, 0).rg;
-  float h = s.r, prev = s.g;
+  vec4 s = texelFetch(uState, p, 0);
+  float h = s.r, prev = s.g, env = s.b;
 
   float lap = H(p + ivec2(1, 0), size) + H(p - ivec2(1, 0), size)
             + H(p + ivec2(0, 1), size) + H(p - ivec2(0, 1), size) - 4.0 * h;
@@ -56,9 +66,12 @@ void main() {
   n += uDrive * exp(-dot(ds, ds) / (uSrc * uSrc));
 
   vec2 c = vUv - 0.5;
-  if (length(c) > boundary(atan(c.y, c.x))) n = 0.0;
+  bool outside = length(c) > boundary(atan(c.y, c.x));
+  if (outside) n = 0.0;
+  env += (abs(h) - env) * uEnvK;
+  if (outside) env = 0.0;
 
-  o = vec4(clamp(n, -4.0, 4.0), h, 0.0, 1.0);
+  o = vec4(clamp(n, -4.0, 4.0), h, env, 1.0);
 }`;
 
 // ---------- Farbe: Hue-Shift (Rotation im YIQ-Farbraum, Helligkeit bleibt) ----------
@@ -261,6 +274,10 @@ uniform highp sampler2DArray uFracArr; // Fraktal-Ebenen: 0 = aktuelle Form, 1..
 uniform float uFracCount; // Anzahl der Fraktal-Ebenen
 uniform float uFracOff;   // Abstand der Fraktal-Ebenen (m)
 uniform float uHue;       // Farbton-Verschiebung des Fraktals
+uniform float uIOR;       // Brechungsindex des Wassers
+uniform float uGlow;      // Leuchten der Wellenberge/-täler (0 = aus)
+uniform float uSkipMain;  // 1 = innerste Fraktal-Ebene wird als Mesh gezeichnet (nicht hier)
+uniform float uReliefBlur; // Weichzeichnung der Relief-Höhenkarte (Mipmap-Stufe)
 uniform float uBlend;     // Mischmodus der Fraktal-Ebenen: 0 Normal, 1 Additiv, 2 Screen, 3 Difference, 4 Aufhellen
 uniform float uRelief;    // Relief-Tiefe (m), 0 = aus
 uniform float uReliefSteps; // Abtastschritte des Reliefs
@@ -282,6 +299,7 @@ float hash(vec2 p) {
 
 ${SUN_GLSL}
 ${COLOR_GLSL}
+${BOUNDARY_GLSL}
 
 vec3 ground(vec2 p) {
   return vec3(0.07, 0.012, 0.006);   // dunkelroter Grund (Korn kommt separat in Ebenen dazu)
@@ -313,7 +331,7 @@ vec2 reliefHit(vec3 rr, vec2 ps, float base, float li, out float shade) {
     if (float(i) > n) break;
     float d = top + rel * float(i) / n;         // aktuelle Strahltiefe
     vec2 p = vLocal + rr.xy * d * iz;
-    float h = texture(uFracArr, vec3(fracUV(p), li)).a;
+    float h = textureLod(uFracArr, vec3(fracUV(p), li), uReliefBlur).a;
     float gap = d - (base - h * rel);           // >= 0: Strahl ist hinter der Oberfläche
     if (gap >= 0.0) {
       float k = prevGap < 0.0 ? clamp(-prevGap / (gap - prevGap), 0.0, 1.0) : 0.0;
@@ -325,8 +343,9 @@ vec2 reliefHit(vec3 rr, vec2 ps, float base, float li, out float shade) {
   }
   // einfache Beleuchtung aus der Höhen-Steigung
   float e = 2.0 * uExtent / float(textureSize(uFracArr, 0).x) * 2.0;
-  float hx = texture(uFracArr, vec3(fracUV(hit + vec2(e, 0.0)), li)).a - texture(uFracArr, vec3(fracUV(hit - vec2(e, 0.0)), li)).a;
-  float hy = texture(uFracArr, vec3(fracUV(hit + vec2(0.0, e)), li)).a - texture(uFracArr, vec3(fracUV(hit - vec2(0.0, e)), li)).a;
+  e *= exp2(uReliefBlur);
+  float hx = textureLod(uFracArr, vec3(fracUV(hit + vec2(e, 0.0)), li), uReliefBlur).a - textureLod(uFracArr, vec3(fracUV(hit - vec2(e, 0.0)), li), uReliefBlur).a;
+  float hy = textureLod(uFracArr, vec3(fracUV(hit + vec2(0.0, e)), li), uReliefBlur).a - textureLod(uFracArr, vec3(fracUV(hit - vec2(0.0, e)), li), uReliefBlur).a;
   vec3 nrm = normalize(vec3(-hx, -hy, e * 4.0 / max(rel, 0.01)));
   shade = 0.7 + 0.6 * max(dot(nrm, normalize(vec3(-0.5, 0.7, 0.6))), 0.0);
   return hit;
@@ -365,7 +384,7 @@ void main() {
 
   // --- Brechung: Strahl durch die Wasserebene auf die Sonnenebene ---
   vec3 ray = normalize(vWorld - uCam);
-  vec3 rr  = refract(ray, n, 1.0 / 1.33);
+  vec3 rr  = refract(ray, n, 1.0 / uIOR);
   float t  = uDepth / max(-rr.z, 0.05);
   vec2 ps  = vLocal + rr.xy * t;
 
@@ -389,6 +408,7 @@ void main() {
       vec2 pl = vLocal + rr.xy * (d * iz);
       vec4 f;
       if (i == mainIdx) {
+        if (uSkipMain > 0.5) continue;
         float shade;
         pl = reliefHit(rr, pl, d, float(i), shade);
         f = texture(uFracArr, vec3(fracUV(pl), float(i)));
@@ -430,6 +450,13 @@ void main() {
   col *= 1.0 - clamp(slope * 1.1, 0.0, 0.7);                 // dunkle Ringe
   float lit = dot(n.xy, normalize(vec2(-0.5, 0.8)));
   col += vec3(0.45, 0.10, 0.03) * max(lit, 0.0) * 0.6;        // warme Lichtkanten
+
+  // --- Sanftes Leuchten von Wellenbergen und -tälern, zum Behälterrand hin ausgeblendet ---
+  if (uGlow > 0.0) {
+    float hc = texture(uWave, wuv).r;
+    float g = smoothstep(0.015, 0.35, abs(hc)) * edgeFade(wuv - 0.5);
+    col += hueShift(vec3(1.0, 0.45, 0.15), uHue) * g * uGlow;
+  }
 
   // --- Vignette: Quad-Rand verschwindet im Schwarz ---
   col *= smoothstep(uHalf, uHalf * 0.35, length(vLocal));
@@ -680,4 +707,160 @@ out vec4 o;
 void main() {
   float a = vA * (1.0 - vV * vV) * pow(vU, 1.5) * 0.7;
   o = vec4(vCol * a, 1.0);
+}`;
+
+
+// ---------- Sand (Cymatics-Partikel) ----------
+// Zustand pro Partikel in einer Float-Textur: xy = Position (UV der Wasserfläche), z = Alter 0..1, w = Saat.
+// Wie Sand auf einer Rüttelplatte: in Schwingungsbäuchen (große Hüllkurve) werden die Körner
+// zufällig weggestoßen, entlang des Hüllkurven-Gefälles rutschen sie in die ruhigen Knotenlinien.
+export const sandUpdateFS = `#version 300 es
+precision highp float;
+uniform sampler2D uState;
+uniform sampler2D uWave;
+uniform float uDt;
+uniform float uLife;      // Lebensdauer eines Korns (s)
+uniform float uTime;
+uniform float uMobility;  // wie stark die Körner ins Ruhige rutschen
+uniform float uJitter;    // wie stark sie in bewegten Bereichen springen
+out vec4 o;
+
+float hash(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+
+void main() {
+  vec4 s = texelFetch(uState, ivec2(gl_FragCoord.xy), 0);
+  vec2 p = s.xy;
+  float age = s.z, seed = s.w;
+  bool fresh = seed == 0.0;
+  if (fresh) seed = hash(gl_FragCoord.xy * 0.731) + 0.001;
+  age += uDt / uLife;
+  if (age >= 1.0 || fresh) {
+    float a = hash(vec2(seed * 91.3, uTime + seed)) * 6.2831853;
+    float r = sqrt(hash(vec2(uTime * 1.7 + seed * 3.1, seed * 17.1))) * 0.48;
+    p = 0.5 + r * vec2(cos(a), sin(a));
+    age = fresh ? hash(vec2(seed, 7.7)) : 0.0;   // anfangs verteilte Alter -> kein gemeinsames Pulsieren
+  }
+  float tx = 2.0 / float(textureSize(uWave, 0).x);
+  float e  = texture(uWave, p).b;
+  float ex = texture(uWave, p + vec2(tx, 0.0)).b - texture(uWave, p - vec2(tx, 0.0)).b;
+  float ey = texture(uWave, p + vec2(0.0, tx)).b - texture(uWave, p - vec2(0.0, tx)).b;
+  vec2 grad = vec2(ex, ey) / (2.0 * tx);
+  vec2 jit = vec2(hash(p * 913.1 + uTime), hash(p * 271.7 - uTime * 1.3)) - 0.5;
+  p += (-grad * uMobility + jit * min(e, 1.0) * uJitter) * uDt;
+  o = vec4(p, age, seed);
+}`;
+
+export const sandVS = `#version 300 es
+uniform sampler2D uState;
+uniform sampler2D uWave;
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform vec3 uCenter;
+uniform float uWaterR;
+uniform float uSize;      // Korngröße (m)
+uniform float uPxScale;
+uniform float uVis;       // Sichtbarkeit (steigt beim Summen, klingt danach ab)
+out float vA;
+${BOUNDARY_GLSL}
+void main() {
+  int w = textureSize(uState, 0).x;
+  ivec2 ij = ivec2(gl_VertexID % w, gl_VertexID / w);
+  vec4 s = texelFetch(uState, ij, 0);
+  vec2 p = s.xy;
+  vec3 world = uCenter + vec3((p - 0.5) * 2.0 * uWaterR, 0.02);
+  vec4 vp = uView * vec4(world, 1.0);
+  gl_Position = uProj * vp;
+  gl_PointSize = clamp(uSize * uPxScale / max(-vp.z, 0.1), 1.0, 8.0);
+  float env = texture(uWave, p).b;
+  float calm = 1.0 - smoothstep(0.02, 0.2, env);      // in den Knotenlinien heller
+  vA = uVis * sin(3.14159 * clamp(s.z, 0.0, 1.0)) * edgeFade(p - 0.5) * (0.25 + 0.75 * calm);
+}`;
+
+export const sandFS = `#version 300 es
+precision mediump float;
+uniform vec3 uColor;
+in float vA;
+out vec4 o;
+void main() {
+  float m = max(1.0 - length(gl_PointCoord * 2.0 - 1.0), 0.0);
+  o = vec4(uColor * vA * m, 1.0);
+}`;
+
+// ---------- Relief als Mesh ----------
+// Unterteiltes Gitter für die innerste Fraktal-Ebene; Höhe = (weichgezeichnete) Helligkeit.
+// Nur in Gebrauch, wenn Relief-Modus "Mesh" gewählt ist.
+export const meshVS = `#version 300 es
+in vec2 aPos;                 // 0..1
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform vec3 uCenter;
+uniform highp sampler2DArray uFracArr;
+uniform float uMain;          // Index der innersten Ebene
+uniform float uLod;           // Weichzeichnung (Mipmap-Stufe)
+uniform float uDisp;          // Verschiebung zum Betrachter (m)
+uniform float uBase;          // Tiefe der Ebene hinter dem Wasser (m)
+uniform float uHalfSize;      // halbe Kantenlänge des Gitters (m)
+uniform float uExtent;
+out vec3 vWorld;
+out vec2 vFuv;
+out vec3 vNormal;
+float H(vec2 fuv) { return textureLod(uFracArr, vec3(fuv, uMain), uLod).a; }
+void main() {
+  vec2 local = (aPos * 2.0 - 1.0) * uHalfSize;
+  vec2 fuv = local / (2.0 * uExtent) + 0.5;
+  float h = H(fuv);
+  vec3 world = uCenter + vec3(local, -uBase + h * uDisp);
+  // weiche Normale aus der (weichgezeichneten) Höhenkarte statt flacher Dreiecks-Normalen
+  float e = exp2(uLod) / float(textureSize(uFracArr, 0).x) * 1.5;
+  float hx = H(fuv + vec2(e, 0.0)) - H(fuv - vec2(e, 0.0));
+  float hy = H(fuv + vec2(0.0, e)) - H(fuv - vec2(0.0, e));
+  float m = 2.0 * e * 2.0 * uExtent;               // Abstand der Proben in Metern
+  vNormal = normalize(vec3(-hx * uDisp / m, -hy * uDisp / m, 1.0));
+  vWorld = world;
+  vFuv = fuv;
+  gl_Position = uProj * uView * vec4(world, 1.0);
+}`;
+
+export const meshFS = `#version 300 es
+precision highp float;
+uniform highp sampler2DArray uFracArr;
+uniform sampler2D uWave;
+uniform float uMain;
+uniform vec3 uCam;
+uniform vec3 uCenter;
+uniform float uWaterR;
+uniform float uBump;
+uniform float uTexel;
+uniform float uIOR;
+uniform float uBase;
+uniform float uExtent;
+in vec3 vWorld;
+in vec2 vFuv;
+in vec3 vNormal;
+out vec4 o;
+void main() {
+  // Wo schneidet der Sichtstrahl die Wasseroberfläche? Dort die Wellen-Neigung lesen
+  vec3 ray = normalize(vWorld - uCam);
+  float t = (uCenter.z - uCam.z) / ray.z;
+  vec2 wl = uCam.xy + ray.xy * t - uCenter.xy;
+  vec2 wuv = wl / (2.0 * uWaterR) + 0.5;
+  float hL = texture(uWave, wuv - vec2(uTexel, 0.0)).r;
+  float hR = texture(uWave, wuv + vec2(uTexel, 0.0)).r;
+  float hD = texture(uWave, wuv - vec2(0.0, uTexel)).r;
+  float hU = texture(uWave, wuv + vec2(0.0, uTexel)).r;
+  vec2 grad = vec2(hR - hL, hU - hD) * uBump;
+  // Näherung der Brechung: Versatz ~ Neigung × Tiefe unter dem Wasser
+  float depthBelow = uCenter.z - vWorld.z;
+  vec2 off = grad * depthBelow * (1.0 - 1.0 / uIOR) * 0.8;
+  vec4 f = texture(uFracArr, vec3(vFuv + off / (2.0 * uExtent), uMain));
+
+  // Licht aus der Geometrie-Neigung (macht die Tiefe lesbar)
+  vec3 nrm = normalize(vNormal);
+  float shade = 0.65 + 0.6 * max(dot(nrm, normalize(vec3(-0.5, 0.7, 0.6))), 0.0);
+  f.rgb *= shade * (1.0 - clamp(length(grad) * 1.1, 0.0, 0.7));
+  o = f;                       // vormultipliziert
 }`;

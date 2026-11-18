@@ -6,7 +6,12 @@
   <title>Vibrations</title>
   <style>
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; color: #e8b48a; }
-    canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+    /* Vorschau als kleines Portal in der Mitte */
+    canvas { position: fixed; left: 50%; top: 46%; transform: translate(-50%, -50%);
+             width: min(56vw, 56vh, 520px); height: min(56vw, 56vh, 520px);
+             border-radius: 28px; display: block; touch-action: none;
+             box-shadow: 0 0 0 1px #e8b48a33, 0 0 60px #ff5a1a22; }
+    canvas.off { visibility: hidden; }
     #version { position: fixed; top: 10px; left: 12px; font-size: 13px; opacity: .7; z-index: 10; }
     #status { position: fixed; top: 30px; left: 12px; font-size: 12px; opacity: .6; z-index: 10; }
     #controls { position: fixed; bottom: 20px; left: 0; right: 0; display: flex; gap: 12px; justify-content: center; z-index: 10; }
@@ -41,6 +46,7 @@
   <div id="panel"></div>
   <div id="controls">
     <button id="toggle">⚙︎</button>
+    <button id="preview">Preview aktivieren</button>
     <button id="mic">🎤 Mikrofon aktivieren</button>
     <button id="vr">Enter VR</button>
   </div>

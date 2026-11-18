@@ -2,17 +2,16 @@
 import {
   simVS, simFS, sceneVS, sceneFS, partVS, partFS, fadeFS,
   flyVS, flyFS, tailVS, tailFS, TAIL_SEGMENTS, fracFS,
+  sandUpdateFS, sandVS, sandFS, meshVS, meshFS,
 } from './shaders.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.10.0';
+const VERSION = 'v0.11.0';
 
 // ---------- Feste Szenenwerte ----------
 const params = new URLSearchParams(location.search);
 const SUPERSAMPLE = parseFloat(params.get('scale') || '1.5'); // 150 % der nativen Display-Auflösung
-const WAVE_K = 0.25;           // c² -> 0.5 Texel pro Schritt
-const DAMP = 0.9993;           // geringe Dämpfung -> Wellen erreichen den Rand und reflektieren
 const SCENE = {
   center: [0, 0, -5],          // Wasserebene 5 m vor dem Startpunkt, auf Augenhöhe
   half: 8.0,                   // Quad 16 × 16 m
@@ -53,8 +52,11 @@ const SECTIONS = [
     echoFade:  { label: 'Echo-Deckkraft', min: 0.1, max: 1, step: 0.05, def: 0.55 },
     echoSat:   { label: 'Echo-Sättigung (+ pro Abstand)', min: 0, max: 1, step: 0.05, def: 0.35 },
     echoHue:   { label: 'Echo-Farbversatz (vorne/hinten gegenläufig)', min: -1, max: 1, step: 0.05, def: 0.2 },
-    relief:    { label: 'Relief-Tiefe (m, 0 = aus)', min: 0, max: 1.5, step: 0.05, def: 0 },
-    reliefSteps: { label: 'Relief-Qualität (Schritte)', min: 6, max: 48, step: 2, def: 16 },
+    reliefMode:  { label: 'Relief', options: [[0, 'Aus'], [1, 'Shader (Parallax)'], [2, 'Mesh (Displacement)']], def: 0 },
+    relief:      { label: 'Relief-Tiefe (m)', min: 0, max: 1.5, step: 0.05, def: 0.5 },
+    reliefBlur:  { label: 'Relief-Weichheit', min: 0, max: 6, step: 0.25, def: 2.5 },
+    reliefSteps: { label: 'Shader: Qualität (Schritte)', min: 6, max: 48, step: 2, def: 16 },
+    meshPolys:   { label: 'Mesh: Polygone', min: 200, max: 20000, step: 200, def: 1000 },
     fracInner: { label: 'Helle Innenflächen', options: [[2, 'Struktur'], [1, 'Hohl'], [0, 'Hell']], def: 2 },
     hueShift:  { label: 'Hue-Shift nach Tonhöhe', min: 0, max: 1, step: 0.05, def: 1 },
   }},
@@ -82,6 +84,15 @@ const SECTIONS = [
     waveGain:   { label: 'Wellen-Stärke', min: 0.2, max: 3, step: 0.1, def: 1 },
     waveDyn:    { label: 'Dynamik', min: 1, max: 4, step: 0.1, def: 2.2 },
     waveFreq:   { label: 'Wellen-Frequenz', min: 0.5, max: 3, step: 0.1, def: 1.3 },
+    waveSpeed:  { label: 'Ausbreitungs-Tempo', min: 0.3, max: 4, step: 0.1, def: 1 },
+    waveDecay:  { label: 'Abklingzeit (s)', min: 0.1, max: 12, step: 0.1, def: 2 },
+    ior:        { label: 'Brechung (IOR)', min: 1, max: 2.2, step: 0.01, def: 1.33 },
+    glow:       { label: 'Leuchtende Wellen', min: 0, max: 1.5, step: 0.05, def: 0 },
+    sand:       { label: 'Sand-Muster', toggle: true, def: false },
+    sandCount:  { label: 'Sand: Anzahl', min: 2000, max: 80000, step: 2000, def: 24000 },
+    sandSize:   { label: 'Sand: Korngröße', min: 0.004, max: 0.04, step: 0.002, def: 0.012 },
+    sandFade:   { label: 'Sand: Nachleuchten (s)', min: 0.5, max: 15, step: 0.5, def: 4 },
+    sandFlow:   { label: 'Sand: Sammeln in Knotenlinien', min: 0.002, max: 0.05, step: 0.002, def: 0.012 },
     simRes:     { label: 'Auflösung', options: [[512, '512'], [768, '768'], [1024, '1024'], [1536, '1536 (schwer)']], def: 768 },
     follow:     { label: 'Zentrum folgt Blick', toggle: true, def: false },
     followSpeed:{ label: 'Folge-Tempo', min: 0.05, max: 2, step: 0.05, def: 0.4 },
@@ -97,6 +108,7 @@ const ui = {
   vr: document.getElementById('vr'),
   panel: document.getElementById('panel'),
   toggle: document.getElementById('toggle'),
+  preview: document.getElementById('preview'),
 };
 ui.version.textContent = `Vibrations ${VERSION}`;
 
@@ -148,6 +160,9 @@ const fadeProg = program(simVS, fadeFS);
 const flyProg = program(flyVS, flyFS);
 const tailProg = program(tailVS, tailFS);
 const fracProg = program(simVS, fracFS);
+const sandUpdProg = program(simVS, sandUpdateFS);
+const sandProg = program(sandVS, sandFS);
+const meshProg = program(meshVS, meshFS);
 const emptyVao = gl.createVertexArray();
 const fullscreen = vao([-1, -1, 3, -1, -1, 3]);
 const h = SCENE.half;
@@ -173,12 +188,16 @@ function target(size, format, srcFormat) {
 
 // Wellen: Ping-Pong; Auflösung umschaltbar, Schritte/s wachsen mit, damit die Wellen in Metern gleich schnell laufen
 let SIM_SIZE = 512, simA, simB;
-const simRate = () => 480 * SIM_SIZE / 512;
+// Ausbreitungs-Tempo: zuerst c² bis kurz unter die Stabilitätsgrenze (0,5), danach mehr Schritte pro Sekunde
+const waveK = () => Math.min(0.25 * S.waveSpeed * S.waveSpeed, 0.45);
+const simRate = () => 480 * SIM_SIZE / 512 * Math.max(S.waveSpeed * 0.5 / Math.sqrt(waveK()), 1);
+// Abklingen: Halbwertszeit in Sekunden -> Dämpfung pro Schritt
+const waveDamp = () => Math.pow(0.5, 1 / (S.waveDecay * simRate()));
 function setSimRes(size) {
   for (const t of [simA, simB]) if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
   SIM_SIZE = size;
-  simA = target(size, gl.RG16F, gl.RG);
-  simB = target(size, gl.RG16F, gl.RG);
+  simA = target(size, gl.RGBA16F, gl.RGBA);
+  simB = target(size, gl.RGBA16F, gl.RGBA);
 }
 setSimRes(S.simRes);
 
@@ -188,7 +207,7 @@ const coronaLayers = [0, 1, 2].map(() => target(PART_SIZE, gl.RGBA16F, gl.RGBA))
 
 // Fraktal: drei Ebenen (aktuell + zwei zeitversetzte Echos in der Tiefe), Auflösung umschaltbar
 // Alle Ebenen liegen in einem Textur-Array; es wird nur so viel Speicher belegt, wie Ebenen eingestellt sind.
-let FRAC_SIZE = 768, fracTex = null, fracFbs = [], fracCount = 0;
+let FRAC_SIZE = 768, fracTex = null, fracFbs = [], fracCount = 0, fracLevels = 1;
 function setFracLayers(size, count) {
   if (fracTex) gl.deleteTexture(fracTex);
   for (const fb of fracFbs) gl.deleteFramebuffer(fb);
@@ -196,7 +215,8 @@ function setFracLayers(size, count) {
   fracCount = count;
   fracTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
-  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA16F, size, size, count);
+  fracLevels = Math.floor(Math.log2(size)) + 1;           // Mipmaps für weiches Relief
+  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, fracLevels, gl.RGBA16F, size, size, count);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -217,6 +237,7 @@ setFracLayers(S.fracRes, S.fracCount);
 let srcPos = [0.5, 0.5];       // Anregungsort (UV), folgt optional dem Blick
 let gazeUV = [0.5, 0.5];
 
+let envK = 0.01;
 function simStep(drive) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, simB.fb);
   gl.viewport(0, 0, SIM_SIZE, SIM_SIZE);
@@ -225,8 +246,9 @@ function simStep(drive) {
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, simA.tex);
   gl.uniform1i(u.uState, 0);
-  gl.uniform1f(u.uK, WAVE_K);
-  gl.uniform1f(u.uDamp, DAMP);
+  gl.uniform1f(u.uK, waveK());
+  gl.uniform1f(u.uDamp, waveDamp());
+  gl.uniform1f(u.uEnvK, envK);
   gl.uniform1f(u.uDrive, drive);
   gl.uniform2fv(u.uSrcPos, srcPos);
   gl.uniform1f(u.uSrc, 0.012);
@@ -238,21 +260,110 @@ function simStep(drive) {
   [simA, simB] = [simB, simA];
 }
 
-// Blickrichtung (oder Zeiger in der 2D-Vorschau) mit der Wasserebene schneiden
-function gazeFromRay(origin, dir) {
-  if (dir[2] >= -0.05) return;
+// Strahl (Blick, Controller oder Zeiger) mit der Wasserebene schneiden -> UV, innerhalb des Behälters gehalten
+function rayToUV(origin, dir, max = 0.3) {
+  if (dir[2] >= -0.05) return null;
   const t = (SCENE.center[2] - origin[2]) / dir[2];
   let x = (origin[0] + dir[0] * t - SCENE.center[0]) / (2 * SCENE.waterR);
   let y = (origin[1] + dir[1] * t - SCENE.center[1]) / (2 * SCENE.waterR);
-  const r = Math.hypot(x, y), max = 0.3;   // innerhalb des Behälters bleiben
+  const r = Math.hypot(x, y);
   if (r > max) { x *= max / r; y *= max / r; }
-  gazeUV = [0.5 + x, 0.5 + y];
+  return [0.5 + x, 0.5 + y];
 }
+function gazeFromRay(origin, dir) { const uv = rayToUV(origin, dir); if (uv) gazeUV = uv; }
+
+// Rechter Controller: wohin der unsichtbare "Laserpointer" zeigt und wie fest der Trigger gedrückt ist
+let ctrlUV = null, ctrlValue = 0;
+// Linker Controller: Trigger-Druck -> Frequenz
+let leftValue = 0;
 
 function updateSource(dt) {
-  const goal = S.follow ? gazeUV : [0.5, 0.5];
-  const k = Math.min(dt * S.followSpeed, 1);          // verzögert nachziehen
+  let goal, k;
+  if (ctrlValue > 0.02 && ctrlUV) {
+    goal = ctrlUV; k = Math.min(dt * 12, 1);         // folgt der Hand fast sofort
+  } else {
+    goal = S.follow ? gazeUV : [0.5, 0.5];
+    k = Math.min(dt * S.followSpeed, 1);              // verzögert nachziehen
+  }
   srcPos = [srcPos[0] + (goal[0] - srcPos[0]) * k, srcPos[1] + (goal[1] - srcPos[1]) * k];
+}
+
+// ---------- Sand (Cymatics-Partikel) ----------
+// Zustand in einer Float32-Textur (Position braucht Präzision); nur angelegt, wenn Sand an ist.
+let sandSize = 0, sandA = null, sandB = null, sandVis = 0, sandTime = 0;
+function stateTarget(size) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, size, size, 0, gl.RGBA, gl.FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  return { tex, fb };
+}
+function ensureSand() {
+  const want = S.sand ? Math.ceil(Math.sqrt(S.sandCount)) : 0;
+  if (want === sandSize) return;
+  for (const t of [sandA, sandB]) if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
+  sandA = sandB = null;
+  sandSize = want;
+  if (want) { sandA = stateTarget(want); sandB = stateTarget(want); }
+}
+function updateSand(dt, level) {
+  ensureSand();
+  if (!sandSize) return;
+  // sichtbar beim Summen, danach langsam verschwinden
+  const goal = level > 0.05 ? 1 : 0;
+  sandVis += (goal - sandVis) * Math.min(dt * (goal > sandVis ? 1.5 : 1 / S.sandFade), 1);
+  sandTime += dt;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, sandB.fb);
+  gl.viewport(0, 0, sandSize, sandSize);
+  gl.useProgram(sandUpdProg.p);
+  const u = sandUpdProg.u;
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, sandA.tex);
+  gl.uniform1i(u.uState, 0);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, simA.tex);
+  gl.uniform1i(u.uWave, 1);
+  gl.uniform1f(u.uDt, dt);
+  gl.uniform1f(u.uLife, S.sandFade * 2.5);
+  gl.uniform1f(u.uTime, sandTime % 1000);
+  gl.uniform1f(u.uMobility, S.sandFlow);
+  gl.uniform1f(u.uJitter, 0.3);
+  gl.bindVertexArray(fullscreen);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  [sandA, sandB] = [sandB, sandA];
+}
+
+// ---------- Ton zum linken Trigger: Sinus mit Obertönen ----------
+let tone = null;
+function ensureTone() {
+  if (tone) return;
+  const ctx = hum.ctx || new AudioContext();
+  const out = ctx.createGain();
+  out.gain.value = 0;
+  out.connect(ctx.destination);
+  const oscs = [[1, 1], [2, 0.45], [3, 0.22], [4, 0.12], [5, 0.06]].map(([mul, vol]) => {
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    const g = ctx.createGain();
+    g.gain.value = vol * 0.35;
+    o.connect(g).connect(out);
+    o.start();
+    return { o, mul };
+  });
+  tone = { ctx, out, oscs };
+}
+function updateTone(active, hz, level) {
+  if (!tone) return;
+  const now = tone.ctx.currentTime;
+  if (tone.ctx.state === 'suspended') tone.ctx.resume();
+  tone.out.gain.setTargetAtTime(active ? 0.12 + 0.18 * level : 0, now, active ? 0.08 : 0.3);
+  if (active) for (const { o, mul } of tone.oscs) o.frequency.setTargetAtTime(hz * mul, now, 0.05);
 }
 
 // ---------- Sonne: wächst beim Summen, federnd nachgezogen ----------
@@ -372,22 +483,34 @@ function update(t) {
   lastT = t;
 
   hum.update();
-  const goal = Math.max(hum.level, manualHum ? 0.6 : 0);
+  // Anregung: Summen, rechter Trigger (analog) oder gedrückter Zeiger in der Vorschau
+  const goal = Math.max(hum.level, manualHum ? 0.6 : 0, ctrlValue);
   amp += (goal - amp) * 0.1;
+
+  // Tonhöhe: linker Trigger hat Vorrang (80–400 Hz nach Druck), sonst Summen
+  const leftActive = leftValue > 0.02;
+  const triggerHz = 80 * Math.pow(400 / 80, Math.min(leftValue, 1));
+  let pitch = hum.pitch;
+  if (leftActive) pitch = triggerHz;
+  else if ((manualHum || ctrlValue > 0.02) && hum.level < 0.05) pitch = 150;
+  if (leftActive) ensureTone();
+  updateTone(leftActive, triggerHz, amp);
 
   // Wellen: Dynamik-Kurve -> leises Summen = kleine Wellen, lautes Summen = volle Stärke
   const drive = S.waveGain * Math.pow(amp, S.waveDyn) * 0.02;
-  const pitch = manualHum && !hum.level ? 150 : hum.pitch;
   const u = Math.min(Math.max(Math.log(pitch / 80) / Math.log(400 / 80), 0), 1);
   const lambda = Math.max(48 * Math.pow(12 / 48, u) * (SIM_SIZE / 512) / S.waveFreq, 5);
-  const freq = Math.sqrt(WAVE_K) / lambda;             // Zyklen pro Schritt
+  const freq = Math.sqrt(waveK()) / lambda;            // Zyklen pro Schritt
 
   updateSource(dt);
-  const steps = Math.min(Math.max(Math.round(dt * simRate()), 1), 24);
+  const rate = simRate();
+  envK = 1 - Math.exp(-1 / (0.25 * rate));             // Hüllkurve folgt mit ~0,25 s
+  const steps = Math.min(Math.max(Math.round(dt * rate), 1), 48);
   for (let i = 0; i < steps; i++) {
     phase += 2 * Math.PI * freq;
     simStep(drive * Math.sin(phase));
   }
+  updateSand(dt, amp);
 
   if (fx) fx.update(hum.level, hum.pitch, hum.rms);
 
@@ -398,13 +521,47 @@ function update(t) {
   morph += dt * S.fracSpeed * (0.25 + amp * 1.5);
   grainT += dt * S.bgSpeed;
   updateSun(dt, amp);
-  updateHue(dt, manualHum && !hum.level ? 150 : hum.pitch, amp > 0.15);
-  if (fractalOn()) drawFractal();
+  updateHue(dt, pitch, amp > 0.15);
+  if (fractalOn()) {
+    drawFractal();
+    // Relief braucht weichgezeichnete Höhen -> Mipmaps nur dann erzeugen
+    const blurOn = S.reliefMode > 0 && S.reliefBlur > 0;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, blurOn ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+    if (blurOn) gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+  }
   drawCorona(dt, amp);
 
   if (hum.active) ui.status.textContent =
     `Mikro: ${(hum.level * 100) | 0}% · ${hum.pitch.toFixed(0)} Hz · Klarheit ${hum.clarity.toFixed(2)}`;
 }
+
+// ---------- Relief-Mesh: Gitter nur anlegen, wenn Mesh-Relief gewählt ist ----------
+let meshVao = null, meshCount = 0, meshPolys = 0;
+function ensureMesh() {
+  const want = S.reliefMode === 2 && fractalOn() ? S.meshPolys : 0;
+  if (want === meshPolys) return;
+  meshPolys = want;
+  if (!want) { meshVao = null; meshCount = 0; return; }
+  const n = Math.max(2, Math.round(Math.sqrt(want / 2)));   // n×n Quads à 2 Dreiecke
+  const pts = new Float32Array((n + 1) * (n + 1) * 2);
+  for (let y = 0, k = 0; y <= n; y++) for (let x = 0; x <= n; x++) { pts[k++] = x / n; pts[k++] = y / n; }
+  const idx = new Uint32Array(n * n * 6);
+  for (let y = 0, k = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const a = y * (n + 1) + x, b = a + 1, c = a + n + 1, d = c + 1;
+    idx.set([a, b, d, a, d, c], k); k += 6;
+  }
+  meshVao = gl.createVertexArray();
+  gl.bindVertexArray(meshVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, pts, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+  meshCount = idx.length;
+}
+const mainDepth = () => Math.max(SCENE.depth + (Math.floor((fracCount - 1) / 2) - (fracCount - 1) / 2) * S.fracDepth, 0.1);
 
 // ---------- Szene zeichnen ----------
 function flyUniforms(u, proj, view, cam, vpH) {
@@ -451,7 +608,14 @@ function drawScene(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uFracOff, S.fracDepth);
   gl.uniform1f(u.uHue, hue);
   gl.uniform1f(u.uBlend, S.fracBlend);
-  gl.uniform1f(u.uRelief, Math.min(S.relief, SCENE.depth - 0.05));   // nicht vor die Wasserebene
+  gl.uniform1f(u.uRelief, S.reliefMode === 1 ? S.relief : 0);
+  gl.uniform1f(u.uReliefBlur, S.reliefBlur);
+  gl.uniform1f(u.uSkipMain, fractalOn() && S.reliefMode === 2 ? 1 : 0);
+  gl.uniform1f(u.uIOR, S.ior);
+  gl.uniform1f(u.uGlow, S.glow);
+  gl.uniform1f(u.uR, 0.49);
+  gl.uniform1f(u.uShape, S.shape);
+  gl.uniform1f(u.uLobe, SCENE.lobe);
   gl.uniform1f(u.uReliefSteps, S.reliefSteps);
   gl.uniform1f(u.uFracRad, SCENE.fracR * S.fracZoom * fracBreath() * 2.4);
   gl.uniform1f(u.uGrain, S.bgGrain ? S.bgStrength : 0);
@@ -465,6 +629,68 @@ function drawScene(proj, view, cam, vpW, vpH) {
   gl.uniform1i(u.uFracArr, 4);
   gl.bindVertexArray(quad);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  // Relief als Mesh: innerste Fraktal-Ebene als verschobenes Gitter (vormultipliziert "über")
+  ensureMesh();
+  if (meshVao && fractalOn()) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(meshProg.p);
+    const g = meshProg.u;
+    gl.uniformMatrix4fv(g.uProj, false, proj);
+    gl.uniformMatrix4fv(g.uView, false, view);
+    gl.uniform3fv(g.uCenter, SCENE.center);
+    gl.uniform3fv(g.uCam, cam);
+    gl.uniform1f(g.uMain, Math.floor((fracCount - 1) / 2));
+    gl.uniform1f(g.uLod, S.reliefBlur);
+    const base = mainDepth();
+    gl.uniform1f(g.uBase, base);
+    gl.uniform1f(g.uDisp, Math.min(S.relief, base - 0.05));   // nicht durch die Wasserebene
+    gl.uniform1f(g.uHalfSize, Math.min(SCENE.fracR * S.fracZoom * 2.4, SCENE.partExtent));
+    gl.uniform1f(g.uExtent, SCENE.partExtent);
+    gl.uniform1f(g.uWaterR, SCENE.waterR);
+    gl.uniform1f(g.uBump, SCENE.bump * SIM_SIZE / 512);
+    gl.uniform1f(g.uTexel, 1 / SIM_SIZE);
+    gl.uniform1f(g.uIOR, S.ior);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
+    gl.uniform1i(g.uFracArr, 4);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, simA.tex);
+    gl.uniform1i(g.uWave, 0);
+    gl.bindVertexArray(meshVao);
+    gl.drawElements(gl.TRIANGLES, meshCount, gl.UNSIGNED_INT, 0);
+    gl.disable(gl.BLEND);
+  }
+
+  // Sand auf der Wasseroberfläche (additiv)
+  if (sandSize && sandVis > 0.003) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.useProgram(sandProg.p);
+    const g = sandProg.u;
+    gl.uniformMatrix4fv(g.uProj, false, proj);
+    gl.uniformMatrix4fv(g.uView, false, view);
+    gl.uniform3fv(g.uCenter, SCENE.center);
+    gl.uniform1f(g.uWaterR, SCENE.waterR);
+    gl.uniform1f(g.uSize, S.sandSize);
+    gl.uniform1f(g.uPxScale, proj[5] * vpH * 0.5);
+    gl.uniform1f(g.uVis, sandVis);
+    gl.uniform1f(g.uR, 0.49);
+    gl.uniform1f(g.uShape, S.shape);
+    gl.uniform1f(g.uLobe, SCENE.lobe);
+    const c = hueRGB([1.0, 0.72, 0.42], fractalOn() ? hue : 0);
+    gl.uniform3f(g.uColor, c[0] * 0.6, c[1] * 0.6, c[2] * 0.6);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sandA.tex);
+    gl.uniform1i(g.uState, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, simA.tex);
+    gl.uniform1i(g.uWave, 1);
+    gl.bindVertexArray(emptyVao);
+    gl.drawArrays(gl.POINTS, 0, sandSize * sandSize);
+    gl.disable(gl.BLEND);
+  }
 
   // Partikel, die auf mich zufliegen: erst Schweife, dann Köpfe (additiv)
   const count = S.flyCount | 0;
@@ -486,6 +712,13 @@ function drawScene(proj, view, cam, vpW, vpH) {
   }
 }
 
+// Hue-Shift auf der CPU (gleiche YIQ-Rotation wie im Shader)
+function hueRGB([r, g, b], a) {
+  const y = 0.299 * r + 0.587 * g + 0.114 * b, i = 0.596 * r - 0.274 * g - 0.322 * b, q = 0.211 * r - 0.523 * g + 0.312 * b;
+  const c = Math.cos(a), s = Math.sin(a), i2 = c * i - s * q, q2 = s * i + c * q;
+  return [y + 0.956 * i2 + 0.621 * q2, y - 0.272 * i2 - 0.647 * q2, y - 1.106 * i2 + 1.703 * q2].map((v) => Math.max(v, 0));
+}
+
 // ---------- 2D-Vorschau (Handy / PC) ----------
 function perspective(fovy, aspect, near, far) {
   const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
@@ -495,16 +728,28 @@ const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 
 
 let xrSession = null;
 let pointerNDC = null;
-let previewFovy = 1.0, previewAspect = 1;
+let previewFovy = 0.75, previewAspect = 1;
+
+// Vorschau: kleines Portal in der Seitenmitte, enger Blickwinkel, volle (nicht überabgetastete) Auflösung.
+// Standardmäßig aus, damit der Quest-Browser ohne VR nicht unnötig rechnet.
+let previewOn = load('ui.preview', false);
+let previewRunning = false;
+function setPreview(on) {
+  previewOn = on;
+  save('ui.preview', on);
+  canvas.classList.toggle('off', !on);
+  ui.preview.textContent = on ? 'Preview aus' : 'Preview aktivieren';
+  if (on && !previewRunning && !xrSession) { lastT = 0; previewRunning = true; requestAnimationFrame(previewFrame); }
+}
 
 function previewFrame(t) {
-  if (xrSession) return;
-  const dpr = (window.devicePixelRatio || 1) * SUPERSAMPLE;
+  if (xrSession || !previewOn) { previewRunning = false; return; }
+  const dpr = window.devicePixelRatio || 1;
   const w = Math.round(canvas.clientWidth * dpr), hgt = Math.round(canvas.clientHeight * dpr);
   if (canvas.width !== w || canvas.height !== hgt) { canvas.width = w; canvas.height = hgt; }
 
   previewAspect = w / hgt;
-  previewFovy = previewAspect < 1 ? 1.6 : 1.0;   // Hochformat: weiter, damit die Scheibe reinpasst
+  previewFovy = parseFloat(params.get('fov') || '0.75');   // ca. 43° – Ausschnitt um das Zentrum
   // In der Vorschau folgt das Zentrum dem Zeiger statt dem Blick
   if (pointerNDC) {
     const tf = Math.tan(previewFovy / 2);
@@ -519,10 +764,14 @@ function previewFrame(t) {
   drawScene(perspective(previewFovy, previewAspect, 0.1, 100), IDENTITY, [0, 0, 0], w, hgt);
   requestAnimationFrame(previewFrame);
 }
-requestAnimationFrame(previewFrame);
+ui.preview.addEventListener('click', () => setPreview(!previewOn));
+setPreview(previewOn);
 
 // Maus / Touch gedrückt halten = Summen simulieren; Position = "Blick"
-const toNDC = (e) => [(e.clientX / innerWidth) * 2 - 1, 1 - (e.clientY / innerHeight) * 2];
+const toNDC = (e) => {
+  const r = canvas.getBoundingClientRect();
+  return [((e.clientX - r.left) / r.width) * 2 - 1, 1 - ((e.clientY - r.top) / r.height) * 2];
+};
 canvas.addEventListener('pointerdown', (e) => { manualHum = true; pointerNDC = toNDC(e); });
 canvas.addEventListener('pointermove', (e) => { pointerNDC = toNDC(e); });
 addEventListener('pointerup', () => { manualHum = false; });
@@ -636,6 +885,7 @@ async function initXR() {
 }
 
 async function startXR() {
+  ensureTone();   // Audio für den linken Trigger – hier noch innerhalb des Klicks anlegen
   const session = await navigator.xr.requestSession('immersive-vr');
   xrSession = session;
   await gl.makeXRCompatible();
@@ -653,12 +903,11 @@ async function startXR() {
     `(Faktor ${(native * SUPERSAMPLE).toFixed(2)})`;
   console.log(ui.status.textContent);
 
-  session.addEventListener('selectstart', () => { manualHum = true; });
-  session.addEventListener('selectend', () => { manualHum = false; });
   session.addEventListener('end', () => {
     xrSession = null;
     lastT = 0;
-    requestAnimationFrame(previewFrame);
+    ctrlValue = leftValue = 0;
+    if (previewOn) { previewRunning = true; requestAnimationFrame(previewFrame); }
   });
   session.requestAnimationFrame(xrFrame);
 }
@@ -677,6 +926,24 @@ function xrFrame(t, frame) {
 
   const hp = pose.transform.position;
   gazeFromRay([hp.x, hp.y, hp.z], forward(pose.transform.orientation));
+
+  // Controller: rechts = Stärke (Trigger-Druck) + Ort (unsichtbarer Strahl der Hand), links = Frequenz
+  ctrlValue = 0; leftValue = 0;
+  for (const src of session.inputSources) {
+    if (!src.gamepad || !src.gamepad.buttons.length) continue;
+    const v = src.gamepad.buttons[0].value;          // Trigger, analog 0..1
+    if (src.handedness === 'right') {
+      ctrlValue = v;
+      const rp = frame.getPose(src.targetRaySpace, refSpace);
+      if (rp) {
+        const o = rp.transform.position;
+        const uv = rayToUV([o.x, o.y, o.z], forward(rp.transform.orientation), 0.42);
+        if (uv) ctrlUV = uv;
+      }
+    } else if (src.handedness === 'left') {
+      leftValue = v;
+    }
+  }
   update(t);
 
   const layer = session.renderState.baseLayer;

@@ -22,7 +22,7 @@ Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Qu
 - Nutzer steht/sitzt still; keine künstliche Fortbewegung.
 - Performance: Quest 3 soll stabil 72–90 fps halten. Wenige Lichter, sparsame Partikel, keine Post-Processing-Ketten.
 
-## Aktueller Stand (v0.10.0) – Szene „Sonne & Wasser“
+## Aktueller Stand (v0.11.0) – Szene „Sonne & Wasser“
 - Look nach Referenz: Sonnenscheibe wie eine Projektion – in Ruhe tiefrot und gedämpft (untergehende afrikanische Sonne), beim Summen hell orange (`uSunHeat` folgt dem federnden Wachstum), schmaler chromatischer Rand (gelb → orange → rot), gesättigter roter Glow, dunkelroter Grund mit feinem Korn.
 - Davor eine transparente, brechende Wasserebene (Quad 16 × 16 m, 5 m vor dem Nutzer, Behälter-Umkreisradius 3 m, Sonnenradius in Ruhe 1,15 m, Fraktal-Grundgröße 1,4 m). Die Sonne liegt 1 m dahinter und wird per Brechung im Shader verzerrt (inkl. Parallaxe).
 - Shapes (Untermenü): Objekt im Zentrum = Sonne oder Fraktal.
@@ -33,14 +33,20 @@ Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Qu
   Innerste Ebene = Hauptform (volle Deckkraft, Relief, Partikel-Quelle). Nach außen: Deckkraft echoFade^Abstand, Sättigung +echoSat × Abstand, Farbversatz echoHue × k (vorne/hinten gegenläufig).
   Ebenen-Mischmodi: Normal, Additiv, Screen, Difference, Aufhellen (`blendLayer()` im Szene-Shader).
   Iterationen 4–96 (Helligkeit auf max. 48 normiert; Kaliset nutzt Iterationen/3).
-  Relief (optional, Standard aus): Parallax-Occlusion-Mapping im Szene-Shader – Helligkeit der innersten Ebene = Höhe, Strahl wird in N Schritten
-  durch die Höhenschicht verfolgt, plus Licht aus der Steigung. Nur aktiv, wenn Relief > 0 und Pixel im Fraktal-Radius; keine zusätzliche Geometrie.
+  Relief (Standard aus), Höhe = Helligkeit der innersten Ebene, weichgezeichnet über Mipmaps (`reliefBlur` = LOD; Mipmaps werden nur bei aktivem Relief erzeugt):
+  „Shader“ = Parallax-Occlusion-Mapping im Szene-Shader (N Schritte, nur im Fraktal-Radius);
+  „Mesh“ = eigenes Gitter (Polygonzahl einstellbar, nur angelegt wenn gewählt) mit Vertex-Displacement, weichen Normalen aus der Höhenkarte
+  und genäherter Brechung durch die Wellen; die innerste Ebene wird dann im Wasser-Shader übersprungen (`uSkipMain`).
   Farbe = Sonnenpalette, dann Hue-Shift (YIQ-Rotation, `hueShift()` in `COLOR_GLSL`) nach Tonhöhe; ohne Summen langsam zurück zur Sonnenfarbe.
   Corona-Partikel entstehen im Fraktal-Modus an zufälligen Orten, sichtbar nur, wo das Fraktal hell ist, in dessen Farbe (Vertex-Shader liest die Fraktal-Textur).
   Auch die Partikel zu mir übernehmen den Farbton.
 - Hintergrund (Untermenü): animiertes Korn (Zellen driften und funkeln weich), bis zu 3 Tiefenebenen hinter dem Objekt (verdeckt), Stärke/Größe/Bewegung/Ebenen/Abstand, abschaltbar.
 - Sonne wächst beim Summen um bis zu 40 % (gedämpfte Feder) und wird dabei hell; Rand wabert organisch (`sunRadius()` in `SUN_GLSL`). Fraktale atmen nur mit 30 % davon.
-- Wellen: 2D-Wellengleichung auf der GPU (RG16F Ping-Pong), Auflösung 512–1536, Schritte/s = 480 × Auflösung/512.
+- Wellen: 2D-Wellengleichung auf der GPU (RGBA16F Ping-Pong: Höhe, vorherige Höhe, Hüllkurve), Auflösung 512–1536.
+  Ausbreitungs-Tempo: c² = 0,25·speed² (max. 0,45), darüber mehr Schritte/s (max. 48 pro Frame). Abklingzeit als Halbwertszeit → Dämpfung pro Schritt.
+  IOR-Regler für die Brechung. Behälterform in `BOUNDARY_GLSL` (gemeinsam für Simulation, Glow, Sand; `edgeFade()` blendet zum Rand aus).
+  Sichtbarkeit: „Leuchtende Wellen“ (|Höhe| leuchtet) und „Sand-Muster“ (Float32-Partikelzustand; Körner springen in Schwingungsbäuchen
+  und rutschen entlang des Hüllkurven-Gefälles in die Knotenlinien; sichtbar beim Summen, verschwinden danach über „Nachleuchten“).
   Anregung: `waveGain * amp^waveDyn` (Dynamik-Kurve: leises Summen = schwache Wellen). Tonhöhe → Wellenlänge, „Wellen-Frequenz“ verkürzt sie.
   Behälterformen (`uShape`): Kreis, 3/4/5/6/8-Eck, Blüte 5/6/8. Optional folgt der Anregungsort verzögert dem Blick (Kopf-Vorwärtsrichtung ∩ Wasserebene; in der 2D-Vorschau dem Zeiger).
 - Corona: zustandslose GPU-Partikel, Emission entlang des Randes über wanderndes Noise (Noise-Größe einstellbar, ganzzahlige Frequenzen → nahtlos).
@@ -53,7 +59,10 @@ Eine ruhige, meditative VR-Erfahrung für die **Meta Quest 3**, die direkt im Qu
 - Feedback-Risiko: Quest-Lautsprecher + Mikro ohne Echounterdrückung. Bei Pfeifen Lautstärke senken oder Kopfhörer nutzen.
 - UI: ⚙︎ blendet das Panel ein/aus; Untermenüs (`<details>`) „Stimme & Effekte“, „Sonne & Corona“, „Partikel zu mir“, „Wasser & Cymatics“.
   Definiert in `SECTIONS` in `main.js`, alles in localStorage.
-- Zum Testen ohne Mikro: Controller-Trigger halten (VR) bzw. Bildschirm gedrückt halten (2D-Vorschau).
+- Controller (VR): rechter Trigger analog = Wellenstärke, Anregungsort = unsichtbarer Strahl der rechten Hand ∩ Wasserebene.
+  Linker Trigger analog = Frequenz (80–400 Hz), dazu Sinuston mit 4 Obertönen.
+- Browser-Vorschau: kleines abgerundetes Portal in der Mitte (Blickwinkel ~43°, `?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
+  (Button „Preview aktivieren“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
 ## Entscheidungen
 - Keine Einbindung in epicscapes.de (Adobe Portfolio) vorerst.
