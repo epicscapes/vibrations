@@ -187,7 +187,8 @@ float escape(vec2 z, vec2 c, int mode, float norm) {
 void main() {
   vec2 p = (vUv * 2.0 - 1.0) * uExtent;      // Meter auf der Ebene
   vec2 z = p / uScale;
-  float m = uMorph;
+  // Kaliset entwickelt sich unter der Haube 4× schneller als die anderen Fraktale
+  float m = uMorph * (uType > 2.5 && uType < 3.5 ? 4.0 : 1.0);
   float t;
 
   if (uType < 0.5) {                          // Julia: c wandert auf dem klassischen Kreis
@@ -277,51 +278,32 @@ uniform float uFracOff;   // Abstand der Fraktal-Ebenen (m)
 uniform float uHue;       // Farbton-Verschiebung des Fraktals
 uniform float uIOR;       // Brechungsindex des Wassers
 uniform float uGlow;      // Leuchten der Wellenberge/-täler (0 = aus)
-uniform float uBlend;     // Mischmodus der Fraktal-Ebenen: 0 Normal, 1 Additiv, 2 Screen, 3 Difference, 4 Aufhellen
+uniform float uBlend;     // Mischmodus der Fraktal-Ebenen: 0 Normal, 1 Additiv, 3 Difference, 5 Soft Light
 uniform float uFracCenter; // Index der stärksten Ebene (0 = vorderste, sonst Mitte)
-uniform float uGrain;     // Stärke des Hintergrund-Korns (0 = aus)
-uniform float uGrainSize; // Korngröße
-uniform float uGrainT;    // integrierte Animationszeit
-uniform float uGrainLayers; // Anzahl Tiefenebenen 1..3
-uniform float uGrainDepth;  // Abstand der Ebenen (m)
 in vec3 vWorld;
 in vec2 vLocal;
 out vec4 o;
-
-float hash(vec2 p) {
-  p = fract(p * vec2(123.34, 456.21));
-  p += dot(p, p + 45.32);
-  return fract(p.x * p.y);
-}
 
 ${SUN_GLSL}
 ${COLOR_GLSL}
 ${BOUNDARY_GLSL}
 
 vec3 ground(vec2 p) {
-  return vec3(0.07, 0.012, 0.006);   // dunkelroter Grund (Korn kommt separat in Ebenen dazu)
+  return vec3(0.07, 0.012, 0.006);   // dunkelroter Grund
 }
 
 vec3 blendLayer(vec3 base, vec4 l) {
   if (uBlend < 0.5) return base * (1.0 - l.a) + l.rgb;                 // Normal
   if (uBlend < 1.5) return base + l.rgb;                               // Additiv
-  if (uBlend < 2.5) return 1.0 - (1.0 - clamp(base, 0.0, 1.0)) * (1.0 - l.rgb);  // Screen
   if (uBlend < 3.5) return abs(base - l.rgb);                          // Difference
-  return max(base, l.rgb);                                             // Aufhellen
+  // Soft Light (Pegtop): hellt/dunkelt die Szene je nach Ebenenfarbe weich, gemischt mit deren Deckkraft
+  vec3 a = clamp(base, 0.0, 1.0);
+  vec3 b = l.rgb / max(l.a, 1e-3);
+  vec3 sl = (1.0 - 2.0 * b) * a * a + 2.0 * b * a;
+  return mix(base, sl, l.a);
 }
 
 vec2 fracUV(vec2 p) { return p / (2.0 * uExtent) + 0.5; }
-
-// Animiertes Korn: Zellen driften langsam und funkeln weich (kein hartes Flackern)
-float grainLayer(vec2 p, float k) {
-  vec2 q = p * 175.0 / uGrainSize * (1.0 + 0.15 * k);
-  q += uGrainT * vec2(2.0 + 1.5 * k, 1.2 - 2.0 * k);
-  vec2 cell = floor(q);
-  float h  = hash(cell + k * 37.0);
-  float h2 = hash(cell + 91.7 + k * 13.0);
-  float tw = 0.5 + 0.5 * sin(uGrainT * 5.0 + h2 * 6.2831853);
-  return (h - 0.5) * (0.4 + 1.2 * tw);
-}
 
 vec3 sun(vec2 p) {
   return sunDisc(p, sunRadius(p)) + ground(p);
@@ -373,20 +355,6 @@ void main() {
       if (i == mainIdx) cover = f.a;
       col = blendLayer(col, f);
     }
-  }
-
-  // Hintergrund-Korn in bis zu drei Tiefenebenen (hintere Ebenen werden vom Objekt verdeckt)
-  if (uGrain > 0.0) {
-    float g = 0.0;
-    for (int k = 0; k < 3; k++) {
-      if (float(k) >= uGrainLayers) break;
-      float fk = float(k);
-      float d = uDepth + fk * uGrainDepth;
-      vec2 pk = vLocal + rr.xy * (d / max(-rr.z, 0.05));
-      float w = (k == 0 ? 1.0 : 1.0 - cover) * (1.0 - 0.25 * fk);
-      g += grainLayer(pk, fk) * w;
-    }
-    col += g * uGrain;
   }
 
   // Corona-Ebenen, von hinten nach vorne "über" die Szene komponiert (vormultipliziert).
@@ -719,19 +687,32 @@ uniform float uSize;      // Korngröße (m)
 uniform float uPxScale;
 uniform float uVis;       // Sichtbarkeit (steigt beim Summen, klingt danach ab)
 uniform vec3  uCam;
-uniform float uSandPos;   // Abstand vor der Wasserfläche Richtung Betrachter (m)
-uniform float uSandSpread;// zufällige Streuung in der Tiefe (m)
+uniform float uWind;      // Windstärke Richtung Betrachter (m/s)
+uniform float uLife;      // Lebensdauer eines Korns (s)
+uniform float uTime;
 out float vA;
+
+// Wind-Noise: ungleichmäßig, Strukturgröße ähnlich der Corona-Emittermaske (einige dm), wandert langsam
+float windNoise(vec2 q, float t) {
+  float n = sin(q.x * 4.3 + t * 0.31) * sin(q.y * 3.7 - t * 0.23)
+          + 0.6 * sin((q.x + q.y) * 7.9 + t * 0.47) * sin((q.x - q.y) * 6.1 - t * 0.37)
+          + 0.35 * sin(q.x * 13.0 - q.y * 11.0 + t * 0.61);
+  return 0.5 + 0.5 * n / 1.95;
+}
 ${BOUNDARY_GLSL}
 void main() {
   int w = textureSize(uState, 0).x;
   ivec2 ij = ivec2(gl_VertexID % w, gl_VertexID / w);
   vec4 s = texelFetch(uState, ij, 0);
   vec2 p = s.xy;
-  // Tiefe: fester Abstand + feste zufällige Streuung je Korn (aus seiner Saat)
-  float spread = (fract(s.w * 47.13) - 0.5) * uSandSpread;
-  float z = clamp(uSandPos + spread, 0.0, -uCenter.z - 0.2);
-  vec3 world = uCenter + vec3((p - 0.5) * 2.0 * uWaterR, 0.02 + z);
+  // Wind: über die Lebenszeit wandert das Korn auf den Betrachter zu, je nach Ort unterschiedlich stark
+  vec2 q = (p - 0.5) * 2.0 * uWaterR;
+  float secs = clamp(s.z, 0.0, 1.0) * uLife;
+  float wn = windNoise(q, uTime);
+  float z = min(uWind * secs * (0.2 + 1.6 * wn), -uCenter.z - 0.2);
+  // leichte seitliche Verwirbelung, wächst mit dem zurückgelegten Weg
+  q += z * 0.12 * vec2(sin(q.y * 5.0 + uTime * 0.5 + wn * 6.0), cos(q.x * 5.0 - uTime * 0.4 + wn * 6.0));
+  vec3 world = uCenter + vec3(q, 0.02 + z);
   vec4 vp = uView * vec4(world, 1.0);
   gl_Position = uProj * vp;
   gl_PointSize = clamp(uSize * uPxScale / max(-vp.z, 0.1), 1.0, 8.0);
@@ -749,4 +730,62 @@ out vec4 o;
 void main() {
   float m = max(1.0 - length(gl_PointCoord * 2.0 - 1.0), 0.0);
   o = vec4(uColor * vA * m, 1.0);
+}`;
+
+
+// ---------- VR-Menü ----------
+// Ein Quad im Raum (über der linken Hand), Inhalt aus einer 2D-Canvas-Textur (vormultipliziert).
+export const menuVS = `#version 300 es
+in vec2 aPos;               // 0..1
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform vec3 uOrigin;       // linke untere Ecke
+uniform vec3 uAxisX;        // Breite (m) als Vektor
+uniform vec3 uAxisY;        // Höhe (m) als Vektor
+out vec2 vUv;
+void main() {
+  vUv = vec2(aPos.x, 1.0 - aPos.y);
+  vec3 w = uOrigin + uAxisX * aPos.x + uAxisY * aPos.y;
+  gl_Position = uProj * uView * vec4(w, 1.0);
+}`;
+
+export const menuFS = `#version 300 es
+precision mediump float;
+uniform sampler2D uTex;
+in vec2 vUv;
+out vec4 o;
+void main() { o = texture(uTex, vUv); }`;
+
+// Laserstrahl: dünnes, zum Betrachter gedrehtes Band zwischen zwei Punkten, mit Lichtpunkt am Ende
+export const beamVS = `#version 300 es
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform vec3 uA;
+uniform vec3 uB;
+uniform vec2 uVp;
+uniform float uWidthPx;
+out float vU;
+void main() {
+  int c = gl_VertexID;
+  float e = (c == 1 || c == 2 || c == 4) ? 1.0 : 0.0;
+  float side = (c == 2 || c == 4 || c == 5) ? 1.0 : -1.0;
+  vec4 a = uProj * uView * vec4(uA, 1.0);
+  vec4 b = uProj * uView * vec4(uB, 1.0);
+  vec2 d = (b.xy / b.w - a.xy / a.w) * uVp;
+  vec2 dir = length(d) > 1e-4 ? normalize(d) : vec2(1.0, 0.0);
+  vec2 perp = vec2(-dir.y, dir.x);
+  vec4 p = mix(a, b, e);
+  p.xy += perp * side * uWidthPx / uVp * p.w;
+  gl_Position = p;
+  vU = e;
+}`;
+
+export const beamFS = `#version 300 es
+precision mediump float;
+uniform vec3 uColor;
+in float vU;
+out vec4 o;
+void main() {
+  float a = 0.25 + 0.75 * vU;          // zum Ziel hin heller
+  o = vec4(uColor * a, a);
 }`;

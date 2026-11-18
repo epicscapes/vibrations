@@ -5,9 +5,10 @@ import {
   sandUpdateFS, sandVS, sandFS,
 } from './shaders.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
+import { VRMenu } from './vrmenu.js';
 
 // Bei jedem Update erhöhen, damit man auf der Quest sieht, ob die neue Version geladen ist.
-const VERSION = 'v0.12.0';
+const VERSION = 'v0.13.0';
 
 // ---------- Feste Szenenwerte ----------
 const params = new URLSearchParams(location.search);
@@ -29,76 +30,72 @@ function load(key, def) { try { const v = localStorage.getItem(key); return v ==
 function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }
 
 const SHAPES = [
-  [0, 'Kreis'], [3, 'Dreieck'], [4, 'Quadrat'], [5, 'Fünfeck'], [6, 'Sechseck'], [8, 'Achteck'],
-  [105, 'Blüte 5'], [106, 'Blüte 6'], [108, 'Blüte 8'],
+  [0, 'Circle'], [3, 'Triangle'], [4, 'Square'], [5, 'Pentagon'], [6, 'Hexagon'], [8, 'Octagon'],
+  [105, 'Flower 5'], [106, 'Flower 6'], [108, 'Flower 8'],
 ];
 
+// Alle UI-Bezeichnungen auf Englisch (Browser und VR).
 const SECTIONS = [
-  { title: 'Stimme & Effekte', items: {
-    volume:  { label: 'Effekt-Lautstärke', min: 0, max: 1.5, step: 0.05, def: 0.7 },
-    dry:     { label: 'Eigene Stimme', min: 0, max: 1.5, step: 0.05, def: 0 },
-    gateThr: { label: 'Gate-Schwelle', min: 0.0005, max: 0.02, step: 0.0005, def: 0.002 },
+  { title: 'Voice & Effects', items: {
+    volume:  { label: 'Effects volume', min: 0, max: 1.5, step: 0.05, def: 0.7 },
+    dry:     { label: 'Dry voice', min: 0, max: 1.5, step: 0.05, def: 0 },
+    gateThr: { label: 'Gate threshold', min: 0.0005, max: 0.02, step: 0.0005, def: 0.002 },
   }, effects: true },
   { title: 'Shapes', items: {
-    centerObj: { label: 'Objekt', options: [[0, 'Sonne'], [1, 'Fraktal']], def: 0 },
-    fracType:  { label: 'Fraktal-Algorithmus', options: [[0, 'Julia'], [1, 'Phoenix'], [2, 'Tricorn'], [3, 'Kaliset'], [4, 'Mandala']], def: 0 },
-    fracZoom:  { label: 'Fraktal-Größe', min: 0.5, max: 2, step: 0.05, def: 1 },
-    fracDepth: { label: 'Fraktal-Tiefe (m)', min: 0, max: 1.5, step: 0.05, def: 0.45 },
-    fracSpeed: { label: 'Entwicklungs-Tempo', min: 0, max: 3, step: 0.1, def: 1 },
-    fracIter:  { label: 'Detail (Iterationen)', min: 4, max: 96, step: 2, def: 48 },
-    fracRes:   { label: 'Fraktal-Auflösung', options: [[512, '512'], [768, '768'], [1024, '1024'], [1536, '1536'], [2048, '2048 (schwer)'], [3072, '3072 (sehr schwer)']], def: 768 },
-    fracCount: { label: 'Anzahl Ebenen', min: 1, max: 6, step: 1, def: 3 },
-    fracFocus: { label: 'Stärkste Ebene', options: [[0, 'Vorderste'], [1, 'Mittlere']], def: 0 },
-    fracBlend: { label: 'Ebenen-Mischmodus', options: [[0, 'Normal'], [1, 'Additiv'], [2, 'Screen'], [3, 'Difference'], [4, 'Aufhellen']], def: 0 },
-    echoFade:  { label: 'Echo-Deckkraft', min: 0.1, max: 1, step: 0.05, def: 0.55 },
-    echoSat:   { label: 'Echo-Sättigung (+ pro Abstand)', min: 0, max: 1, step: 0.05, def: 0.35 },
-    echoHue:   { label: 'Echo-Farbversatz (pro Abstand)', min: -1, max: 1, step: 0.05, def: 0.2 },
-    fracInner: { label: 'Helle Innenflächen', options: [[2, 'Struktur'], [1, 'Hohl'], [0, 'Hell']], def: 2 },
-    hueShift:  { label: 'Hue-Shift nach Tonhöhe', min: 0, max: 1, step: 0.05, def: 1 },
+    centerObj: { label: 'Object', options: [[0, 'Sun'], [1, 'Fractal']], def: 0 },
+    fracType:  { label: 'Fractal', options: [[0, 'Julia'], [1, 'Phoenix'], [2, 'Tricorn'], [3, 'Kaliset'], [4, 'Mandala']], def: 0 },
+    fracZoom:  { label: 'Fractal size', min: 0.5, max: 2, step: 0.05, def: 1 },
+    fracDepth: { label: 'Fractal depth (m)', min: 0, max: 1.5, step: 0.05, def: 0.45 },
+    fracSpeed: { label: 'Evolution speed', min: 0, max: 3, step: 0.1, def: 1 },
+    fracIter:  { label: 'Detail (iterations)', min: 4, max: 96, step: 2, def: 48 },
+    fracRes:   { label: 'Fractal resolution', options: [[512, '512'], [768, '768'], [1024, '1024'], [1536, '1536'], [2048, '2048 (heavy)'], [3072, '3072 (very heavy)']], def: 768 },
+    fracCount: { label: 'Layers', min: 1, max: 6, step: 1, def: 3 },
+    fracFocus: { label: 'Strongest layer', options: [[0, 'Front'], [1, 'Middle']], def: 0 },
+    fracBlend: { label: 'Layer blend mode', options: [[0, 'Normal'], [1, 'Additive'], [3, 'Difference'], [5, 'Soft Light']], def: 0 },
+    echoFade:  { label: 'Echo opacity', min: 0.1, max: 1, step: 0.05, def: 0.55 },
+    fracInner: { label: 'Interior', options: [[2, 'Structure'], [1, 'Hollow']], def: 2 },
   }},
-  { title: 'Hintergrund', items: {
-    bgGrain:  { label: 'Korn an', toggle: true, def: true },
-    bgStrength: { label: 'Stärke', min: 0, max: 0.12, step: 0.005, def: 0.03 },
-    bgSize:   { label: 'Korngröße', min: 0.3, max: 4, step: 0.1, def: 1 },
-    bgSpeed:  { label: 'Bewegung', min: 0, max: 2, step: 0.05, def: 0.4 },
-    bgLayers: { label: 'Ebenen', min: 1, max: 3, step: 1, def: 3 },
-    bgDepth:  { label: 'Ebenen-Abstand (m)', min: 0, max: 3, step: 0.1, def: 1 },
+  { title: 'Sun & Corona', items: {
+    coronaCount: { label: 'Count', min: 0, max: 18000, step: 300, def: 6000 },
+    coronaSize:  { label: 'Size', min: 0.3, max: 3, step: 0.1, def: 1 },
+    coronaNoise: { label: 'Noise size', min: 0.15, max: 1.5, step: 0.05, def: 0.5 },
+    coronaDepth: { label: 'Depth spread (m)', min: 0, max: 1.5, step: 0.05, def: 0.6 },
   }},
-  { title: 'Sonne & Corona', items: {
-    coronaCount: { label: 'Anzahl', min: 0, max: 18000, step: 300, def: 6000 },
-    coronaSize:  { label: 'Größe', min: 0.3, max: 3, step: 0.1, def: 1 },
-    coronaNoise: { label: 'Noise-Größe', min: 0.15, max: 1.5, step: 0.05, def: 0.5 },
-    coronaDepth: { label: 'Tiefenverteilung (m)', min: 0, max: 1.5, step: 0.05, def: 0.6 },
+  { title: 'Incoming Particles', items: {
+    flyCount: { label: 'Count', min: 0, max: 4000, step: 50, def: 800 },
+    flySize:  { label: 'Size', min: 0.004, max: 0.06, step: 0.002, def: 0.018 },
+    flyTail:  { label: 'Tail length', min: 0, max: 0.15, step: 0.005, def: 0.05 },
   }},
-  { title: 'Partikel zu mir', items: {
-    flyCount: { label: 'Anzahl', min: 0, max: 4000, step: 50, def: 800 },
-    flySize:  { label: 'Größe', min: 0.004, max: 0.06, step: 0.002, def: 0.018 },
-    flyTail:  { label: 'Schweiflänge', min: 0, max: 0.15, step: 0.005, def: 0.05 },
-  }},
-  { title: 'Wasser & Cymatics', items: {
-    shape:      { label: 'Form', options: SHAPES, def: 6 },
-    waveGain:   { label: 'Wellen-Stärke', min: 0.2, max: 3, step: 0.1, def: 1 },
-    waveDyn:    { label: 'Dynamik', min: 1, max: 4, step: 0.1, def: 2.2 },
-    waveFreq:   { label: 'Wellen-Frequenz', min: 0.5, max: 3, step: 0.1, def: 1.3 },
-    waveSpeed:  { label: 'Ausbreitungs-Tempo', min: 0.3, max: 4, step: 0.1, def: 1 },
-    waveDecay:  { label: 'Abklingzeit (s)', min: 0.1, max: 12, step: 0.1, def: 2 },
-    ior:        { label: 'Brechung (IOR)', min: 0.5, max: 2.2, step: 0.01, def: 1.33 },
-    edgeSoft:   { label: 'Rand-Ausblendung (nur optisch)', min: 0, max: 0.6, step: 0.02, def: 0.25 },
-    glow:       { label: 'Leuchtende Wellen', min: 0, max: 1.5, step: 0.05, def: 0 },
-    sand:       { label: 'Sand-Muster', toggle: true, def: false },
-    sandCount:  { label: 'Sand: Anzahl', min: 2000, max: 80000, step: 2000, def: 24000 },
-    sandSize:   { label: 'Sand: Korngröße', min: 0.004, max: 0.04, step: 0.002, def: 0.012 },
-    sandFade:   { label: 'Sand: Nachleuchten (s)', min: 0.5, max: 15, step: 0.5, def: 4 },
-    sandFlow:   { label: 'Sand: Sammeln in Knotenlinien', min: 0.002, max: 0.05, step: 0.002, def: 0.012 },
-    sandPos:    { label: 'Sand: Abstand vor dem Wasser (m)', min: 0, max: 4.6, step: 0.05, def: 0 },
-    sandSpread: { label: 'Sand: Tiefen-Streuung (m)', min: 0, max: 3, step: 0.05, def: 0 },
-    simRes:     { label: 'Auflösung', options: [[512, '512'], [768, '768'], [1024, '1024'], [1536, '1536 (schwer)']], def: 768 },
-    follow:     { label: 'Zentrum folgt Blick', toggle: true, def: false },
-    followSpeed:{ label: 'Folge-Tempo', min: 0.05, max: 2, step: 0.05, def: 0.4 },
+  { title: 'Water & Cymatics', items: {
+    shape:      { label: 'Shape', options: SHAPES, def: 6 },
+    simRes:     { label: 'Resolution', options: [[512, '512'], [768, '768'], [1024, '1024'], [1536, '1536 (heavy)']], def: 768 },
+    waveGain:   { label: 'Wave strength', min: 0.2, max: 3, step: 0.1, def: 1 },
+    waveDyn:    { label: 'Dynamics', min: 1, max: 4, step: 0.1, def: 2.2 },
+    waveFreq:   { label: 'Wave frequency', min: 0.5, max: 3, step: 0.1, def: 1.3 },
+    waveSpeed:  { label: 'Propagation speed', min: 0.3, max: 4, step: 0.1, def: 1 },
+    waveDecay:  { label: 'Decay time (s)', min: 0.1, max: 12, step: 0.1, def: 2 },
+    ior:        { label: 'Refraction (IOR)', min: 0.5, max: 2.2, step: 0.01, def: 1.33 },
+    glow:       { label: 'Glowing waves', min: 0, max: 1.5, step: 0.05, def: 0 },
+    sand:       { label: 'Sand patterns', toggle: true, def: false },
+    sandCount:  { label: 'Sand: count', min: 2000, max: 80000, step: 2000, def: 24000 },
+    sandSize:   { label: 'Sand: grain size', min: 0.004, max: 0.04, step: 0.002, def: 0.012 },
+    sandFade:   { label: 'Sand: afterglow (s)', min: 0.5, max: 15, step: 0.5, def: 4 },
+    sandFlow:   { label: 'Sand: gather in nodal lines', min: 0.002, max: 0.05, step: 0.002, def: 0.012 },
+    sandWind:   { label: 'Sand: wind toward me', min: 0, max: 1.5, step: 0.05, def: 0.25 },
+    follow:     { label: 'Center follows gaze', toggle: true, def: false },
   }},
 ];
-const S = {};
-for (const sec of SECTIONS) for (const [k, d] of Object.entries(sec.items)) S[k] = load('set.' + k, d.def);
+// Feste Werte (früher Regler)
+const FIXED = { echoSat: 0.5, echoHue: 0.2, hueShift: 1, edgeSoft: 0.6, followSpeed: 2.0 };
+
+const S = { ...FIXED };
+for (const sec of SECTIONS) for (const [k, d] of Object.entries(sec.items)) {
+  let v = load('set.' + k, d.def);
+  // gespeicherte Werte, die es nicht mehr gibt (entfernte Optionen), auf Standard zurücksetzen
+  if (d.options && !d.options.some(([ov]) => ov === v)) v = d.def;
+  if (d.min !== undefined && !(v >= d.min && v <= d.max)) v = d.def;
+  S[k] = v;
+}
 
 const ui = {
   version: document.getElementById('version'),
@@ -114,9 +111,9 @@ ui.version.textContent = `Vibrations ${VERSION}`;
 // ---------- WebGL2 ----------
 const canvas = document.getElementById('c');
 const gl = canvas.getContext('webgl2', { antialias: false, xrCompatible: true, alpha: false });
-if (!gl) throw fail('WebGL2 wird nicht unterstützt.');
+if (!gl) throw fail('WebGL2 is not supported.');
 if (!gl.getExtension('EXT_color_buffer_float') && !gl.getExtension('EXT_color_buffer_half_float')) {
-  throw fail('Float-Rendertargets werden nicht unterstützt.');
+  throw fail('Float render targets are not supported.');
 }
 
 function fail(msg) { ui.status.textContent = msg; return new Error(msg); }
@@ -178,7 +175,7 @@ function target(size, format, srcFormat) {
   const fb = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw fail('Framebuffer unvollständig.');
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw fail('Framebuffer incomplete.');
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT);
   return { tex, fb };
@@ -338,7 +335,7 @@ function updateSand(dt, level) {
 // ---------- Sonne: wächst beim Summen, federnd nachgezogen ----------
 let sunScale = 1, sunVel = 0, sunWob = 0;
 let flow = 0, turb = 0, clock = 0, flyFlow = 0;
-let morph = 0, hue = 0, grainT = 0;
+let morph = 0, hue = 0;
 
 // Fraktale atmen nur leicht mit (die Sonne wächst stärker)
 const fracBreath = () => 1 + (sunScale - 1) * 0.3;
@@ -484,14 +481,13 @@ function update(t) {
   flyFlow += dt * (0.06 + amp * 0.35);
   clock += dt;
   morph += dt * S.fracSpeed * (0.25 + amp * 1.5);
-  grainT += dt * S.bgSpeed;
   updateSun(dt, amp);
   updateHue(dt, pitch, amp > 0.15);
   if (fractalOn()) drawFractal();
   drawCorona(dt, amp);
 
   if (hum.active) ui.status.textContent =
-    `Mikro: ${(hum.level * 100) | 0}% · ${hum.pitch.toFixed(0)} Hz · Klarheit ${hum.clarity.toFixed(2)}`;
+    `Mic: ${(hum.level * 100) | 0}% · ${hum.pitch.toFixed(0)} Hz · clarity ${hum.clarity.toFixed(2)}`;
 }
 
 // ---------- Szene zeichnen ----------
@@ -537,7 +533,7 @@ function drawScene(proj, view, cam, vpW, vpH) {
   });
   gl.uniform1f(u.uMode, fractalOn() ? 1 : 0);
   gl.uniform1f(u.uFracOff, S.fracDepth);
-  gl.uniform1f(u.uHue, hue);
+  gl.uniform1f(u.uHue, fractalOn() ? hue : 0);   // Sonne: Glow nur in Sonnenfarben
   gl.uniform1f(u.uBlend, S.fracBlend);
   gl.uniform1f(u.uIOR, S.ior);
   gl.uniform1f(u.uEdgeSoft, S.edgeSoft);
@@ -546,11 +542,6 @@ function drawScene(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uR, 0.49);
   gl.uniform1f(u.uShape, S.shape);
   gl.uniform1f(u.uLobe, SCENE.lobe);
-  gl.uniform1f(u.uGrain, S.bgGrain ? S.bgStrength : 0);
-  gl.uniform1f(u.uGrainSize, S.bgSize);
-  gl.uniform1f(u.uGrainT, grainT);
-  gl.uniform1f(u.uGrainLayers, S.bgLayers);
-  gl.uniform1f(u.uGrainDepth, S.bgDepth);
   gl.uniform1f(u.uFracCount, fracCount);
   gl.activeTexture(gl.TEXTURE4);
   gl.bindTexture(gl.TEXTURE_2D_ARRAY, fracTex);
@@ -572,8 +563,9 @@ function drawScene(proj, view, cam, vpW, vpH) {
     gl.uniform1f(g.uPxScale, proj[5] * vpH * 0.5);
     gl.uniform1f(g.uVis, sandVis);
     gl.uniform3fv(g.uCam, cam);
-    gl.uniform1f(g.uSandPos, S.sandPos);
-    gl.uniform1f(g.uSandSpread, S.sandSpread);
+    gl.uniform1f(g.uWind, S.sandWind);
+    gl.uniform1f(g.uLife, S.sandFade * 2.5);
+    gl.uniform1f(g.uTime, sandTime % 1000);
     gl.uniform1f(g.uEdgeSoft, S.edgeSoft);
     gl.uniform1f(g.uR, 0.49);
     gl.uniform1f(g.uShape, S.shape);
@@ -637,7 +629,7 @@ function setPreview(on) {
   previewOn = on;
   save('ui.preview', on);
   canvas.classList.toggle('off', !on);
-  ui.preview.textContent = on ? 'Preview aus' : 'Preview aktivieren';
+  ui.preview.textContent = on ? 'Disable preview' : 'Enable preview';
   if (on && !previewRunning && !xrSession) { lastT = 0; previewRunning = true; requestAnimationFrame(previewFrame); }
 }
 
@@ -681,6 +673,26 @@ const fxState = {};
 
 function decimals(step) { return step >= 1 ? 0 : Math.min(Math.ceil(-Math.log10(step)), 4); }
 
+// Browser-Eingabefelder je Einstellung, damit Änderungen aus dem VR-Menü dort sichtbar werden
+const inputs = {}, fxInputs = {};
+
+// Zentrale Stelle für Wertänderungen (Browser-UI und VR-Menü)
+function setSetting(key, value) {
+  S[key] = value;
+  save('set.' + key, value);
+  applySetting(key);
+  const el = inputs[key];
+  if (el) { if (el.type === 'checkbox') el.checked = value; else el.value = value; el.dispatchEvent(new Event('sync')); }
+  if (vrMenu) vrMenu.markDirty();
+}
+function setEffect(key, on) {
+  fxState[key] = on;
+  save('fx.' + key, on);
+  if (fx) fx.set(key, on);
+  if (fxInputs[key]) fxInputs[key].checked = on;
+  if (vrMenu) vrMenu.markDirty();
+}
+
 function applySetting(key) {
   if (key === 'simRes') setSimRes(S.simRes);
   if (key === 'fracRes' || key === 'fracCount') setFracLayers(S.fracRes, S.fracCount);
@@ -711,11 +723,8 @@ SECTIONS.forEach((sec, i) => {
       el.innerHTML = `<input type="checkbox"> ${label}`;
       const box = el.querySelector('input');
       box.checked = fxState[key];
-      box.addEventListener('change', () => {
-        fxState[key] = box.checked;
-        save('fx.' + key, box.checked);
-        if (fx) fx.set(key, box.checked);
-      });
+      fxInputs[key] = box;
+      box.addEventListener('change', () => setEffect(key, box.checked));
       row.appendChild(el);
     }
     body.appendChild(row);
@@ -743,12 +752,11 @@ SECTIONS.forEach((sec, i) => {
       input.value = S[key];
     }
     const show = () => { val.textContent = d.min !== undefined ? (+S[key]).toFixed(decimals(d.step)) : ''; };
+    inputs[key] = input;
     input.addEventListener(d.options || d.toggle ? 'change' : 'input', () => {
-      S[key] = d.toggle ? input.checked : +input.value;
-      save('set.' + key, S[key]);
-      applySetting(key);
-      show();
+      setSetting(key, d.toggle ? input.checked : +input.value);
     });
+    input.addEventListener('sync', show);
     row.append(name, input, val);
     body.appendChild(row);
     show();
@@ -757,6 +765,14 @@ SECTIONS.forEach((sec, i) => {
 });
 ui.toggle.addEventListener('click', () => ui.panel.classList.toggle('hidden'));
 
+// ---------- VR-Menü (über der linken Hand; X-Taste öffnet/schließt) ----------
+const vrMenu = new VRMenu(gl, {
+  program, sections: SECTIONS, S,
+  effects: Object.entries(EFFECTS).map(([key, e]) => ({ key, label: e.label })),
+  onChange: setSetting,
+  fx: { get: (k) => fxState[k], set: setEffect },
+});
+
 ui.mic.addEventListener('click', async () => {
   try {
     await hum.start();
@@ -764,10 +780,10 @@ ui.mic.addEventListener('click', async () => {
     Object.assign(fx.enabled, fxState);
     await fx.init();
     for (const k of ['volume', 'dry', 'gateThr']) applySetting(k);
-    ui.mic.textContent = '🎤 Mikrofon aktiv';
+    ui.mic.textContent = '🎤 Microphone on';
     ui.mic.disabled = true;
   } catch (e) {
-    ui.status.textContent = 'Mikrofon nicht verfügbar: ' + e.message;
+    ui.status.textContent = 'Microphone not available: ' + e.message;
   }
 });
 
@@ -776,7 +792,7 @@ let refSpace = null;
 
 async function initXR() {
   if (!navigator.xr || !(await navigator.xr.isSessionSupported('immersive-vr'))) {
-    ui.vr.textContent = 'VR nicht verfügbar';
+    ui.vr.textContent = 'VR not available';
     ui.vr.disabled = true;
     return;
   }
@@ -797,8 +813,8 @@ async function startXR() {
   session.updateRenderState({ baseLayer: layer, depthNear: 0.1, depthFar: 100 });
   refSpace = await session.requestReferenceSpace('local');
 
-  ui.status.textContent = `XR-Framebuffer: ${layer.framebufferWidth}×${layer.framebufferHeight} ` +
-    `(Faktor ${(native * SUPERSAMPLE).toFixed(2)})`;
+  ui.status.textContent = `XR framebuffer: ${layer.framebufferWidth}×${layer.framebufferHeight} ` +
+    `(factor ${(native * SUPERSAMPLE).toFixed(2)})`;
   console.log(ui.status.textContent);
 
   session.addEventListener('end', () => {
@@ -825,10 +841,14 @@ function xrFrame(t, frame) {
   const hp = pose.transform.position;
   gazeFromRay([hp.x, hp.y, hp.z], forward(pose.transform.orientation));
 
+  // VR-Menü: zeigt der rechte Laser darauf, bedient der rechte Trigger das Menü statt Wellen zu machen
+  const menuBusy = vrMenu.update(frame, refSpace, [hp.x, hp.y, hp.z]);
+
   // Controller (beide Hände): Stärke = Trigger-Druck, Ort = unsichtbarer Strahl der fester gedrückten Hand
   ctrlValue = 0;
   for (const src of session.inputSources) {
     if (!src.gamepad || !src.gamepad.buttons.length) continue;
+    if (menuBusy && src.handedness === 'right') continue;
     const v = src.gamepad.buttons[0].value;          // Trigger, analog 0..1
     if (v <= ctrlValue) continue;
     ctrlValue = v;
@@ -850,6 +870,7 @@ function xrFrame(t, frame) {
     gl.viewport(vp.x, vp.y, vp.width, vp.height);
     const p = view.transform.position;
     drawScene(view.projectionMatrix, view.transform.inverse.matrix, [p.x, p.y, p.z], vp.width, vp.height);
+    vrMenu.draw(view.projectionMatrix, view.transform.inverse.matrix, vp.width, vp.height);
   }
 }
 

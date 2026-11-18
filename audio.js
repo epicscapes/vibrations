@@ -78,11 +78,11 @@ export class HumDetector {
 // ---------------------------------------------------------------------------
 
 export const EFFECTS = {
-  hall:    { label: 'Hall',          default: true },
+  hall:    { label: 'Reverb',        default: true },
   echo:    { label: 'Echo',          default: false },
   grain:   { label: 'Grain Delay',   default: false },
   shimmer: { label: 'Shimmer',       default: false },
-  harmony: { label: 'Obertöne',      default: false },
+  harmony: { label: 'Harmonics',     default: false },
 };
 
 function impulseResponse(ctx, seconds, decay) {
