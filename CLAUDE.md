@@ -75,7 +75,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.21.0)
+## Flow Drift (Stand v0.22.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
   Himmel: Aurora-Schleier rundherum, keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
   Die Schleier sind parallel zur Lichtstrahl-Richtung `SHAFT_DIR` = normalize(0.35, 1, 0.15): Muster hängt nur vom Winkel um diese Achse ab
@@ -104,9 +104,14 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Intensität `fdRipples`, Frequenz `fdRipFreq` (Neigung so normiert, dass die Stärke gleich bleibt), Ausklingzeit `fdRipFade` (Hüllkurve `ripEnv`: schnell an, exponentiell aus).
   0–3 eingeschlossene Schalen (`fdLayers`) mit gravurartigen Julia-Wirbellinien; Größe `fdLayerScale` (Radius (0,8 − 0,22·k)·Skala, max. 0,95).
   Jede Schale hat eine eigene Drehung (`uShellRot[3]`, CPU): gleiche Achse wie die Kugel, Tempo 1 + (1/Radius − 1)·`fdLayerSpin` → kleinere drehen schneller.
+  Treffer-Ripples: Stößt ein Begleiter an die Hauptkugel, läuft auf beiden Kugeln ein Wellenpaket vom Kontaktpunkt um die Kugel
+  (Front 3 rad/s, Ausklingen über `fdRipFade`, je Kugel die 2 neuesten Treffer: `uHitDir/Age/Amp[2]`, `addHit()`).
+  Glitzerpunkte auf der Oberfläche (`fdSurfGlit`, `GLIT_GLSL`): Zellen im Objektraum (drehen mit), je Zelle ein Punkt, der kurz aufblitzt; Dichte ∝ Radius (`uGlitScale` = 40·r).
   Innenlicht, Austritt + Hintergrund-Näherung. Roughness (`fdRough`) macht Inneres/Hintergrund weicher und Glanz breiter.
   (Die Mehrstrahl-Variante „Realistic rays“ aus v0.17 wurde auf Wunsch wieder entfernt.) Fresnel-Saum in Szenenfarbe (`fdBallFresnel`, 0–3).
 - Begleiter (Grundradius 0,12 m, je Kugel 0,75–1,3 ×): leuchtende Kugeln (innen hell Lavendel, zum Rand Glow-Farbton), keine Fraktale, kein Halo-Sprite.
+  Material umschaltbar (`fdCompGlass`, Standard an): gleicher Glas-Shader wie die Hauptkugel ohne innere Schalen, Innenlicht = Leuchten des Begleiters,
+  Antriebs-Ripple auf der Rückseite gegen ihre Bewegungsrichtung (Hüllkurve aus ihrem Tempo, `c.ripEnv`), Treffer-Ripples, Glitzer. Aus = alte Leuchtkugel (mit Glitzer).
   Jede Kugel ist individuell (Zufall beim Entstehen): Größe, Farbton-Versatz (−0,2…0,55), Helligkeit, Zug/Bremsen, eigener wandernder Zielpunkt um die Hauptkugel,
   seitliches Schlingern. Helligkeit `fdCompBright`: gedimmt wird der weißliche Kern kleiner und die Farbe satter (kein Vergrauen), heller wächst der Kern.
   Von jedem Begleiter steigen ständig ein paar glitzernde Partikel auf (Ringpuffer `motes`, ~7/s, wenig Deckkraft). Schnurr-Vibration: Größe ±3,5 % und Helligkeit ±12 % zittern schnell, moduliert mit langsamem Atmen.
@@ -141,11 +146,14 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Depth-Buffer an (XR-Layer `depth: true`), Reihenfolge: Kugeln → Gelände → Himmel (Vollbild-Dreieck auf der fernen Ebene, `LEQUAL`) → additive Effekte.
   So werden verdeckte Pixel gar nicht erst schattiert (Gelände hinter der Kugel, Himmel hinter dem Gelände).
 - Performance (v0.21, Headless-Messung −35 %, Look unverändert):
-  Gelände-Shader rechnet zuerst den Nebel und bricht bei vollständig vernebelten Pixeln ab; Lichter nur bis 12 m (weich ab 9 m);
+  Gelände-Shader rechnet zuerst den Nebel und bricht bei vollständig vernebelten Pixeln ab; Kugel-Lichter nur bis 3 m (weich ab 2 m);
   Körnung nur < 10 m, Höhenlinien nur < 30 m; Himmels-Spiegelung von Boden und Murmel-Hintergrund mit `skyColorLite` (ohne feine Schleier-Schicht).
   Murmel: Julia-Iterationen 22 → 16, je größer die Kugel im Bild (150–600 px Radius, `uIter`).
   Display-Menü: „Foveated rendering“ (`fdFoveation`, 0–1, Standard 0,5 → `XRWebGLLayer.fixedFoveation`; wirkt nicht bei Bloom, da die Szene dann in einen eigenen Puffer geht),
   „Frame rate“ (`fdFrameRate` 72/90/120 Hz, Standard 72 → `updateTargetFrameRate`, nächster unterstützter Wert). XR-Layer entsteht zentral in `makeLayer()`.
+  Foveation wird zusätzlich beim Sessionstart als optionalFeature angefordert (`low/medium/high-fixed-foveation-level` je nach Regler).
+  Laut Meta wirkt FFR nur, wenn direkt in den XR-Puffer gerendert wird und mitten im Frame kein Render-Ziel gewechselt wird (Bloom → keine Wirkung).
+  „FPS“-Zeile im Display-Menü (Anzeige-Zeile, `info:` in SECTIONS, vrmenu zeichnet sie alle 0,5 s neu): fps / Ziel-Hz · längster Frame · aktiver FFR-Wert („n/a“ = nicht unterstützt).
 - Tests: `?debug=1` legt den Zustand als `window.__fd` offen.
 - Profiling: `?profile=1` misst jeden Render-Abschnitt (sky, terrain, companions, ball, shafts, sparks, motes, goals, ribbon, rings, wings, bloom, menu)
   und die CPU-Teile (update, goals+companions, particles, sound, upload); Mittel über 120 Frames in der Statuszeile und als `PROFILE`-Konsolenzeile
