@@ -139,6 +139,12 @@ uniform float uGrain;       // Körnung als Bump (zeigt Bewegung besser)
 uniform float uLines;       // leuchtende Höhenlinien
 uniform float uFresnel;     // dezenter Fresnel-Saum in Szenenfarbe (0 = aus)
 uniform float uSpecRough;   // Rauheit der Licht-Glanzflecken (0 = scharf, 1 = breit)
+uniform sampler2D uTrack;   // Spuren im Boden (Höhe 0..1, gekachelt in Weltkoordinaten)
+uniform float uTrackAmt;    // Stärke (0 = aus)
+uniform float uTrackSize;   // Kachelgröße (m)
+uniform vec2 uTrackCenter;  // Spieler (xz)
+uniform float uTrackRadius;
+float trackH(vec2 p) { return textureLod(uTrack, p / uTrackSize, 0.0).r; }
 in vec3 vWorld;
 out vec4 o;
 ${COLOR_GLSL}
@@ -174,9 +180,22 @@ void main() {
     float gz = vnoise(q + vec2(0.0, e)) - vnoise(q - vec2(0.0, e));
     n = normalize(n + vec3(gx, 0.0, gz) * uGrain * 0.35 * (1.0 - smoothstep(3.0, 10.0, dist)));
   }
+  // Spuren: Rille als Bump (Normale kippen), leicht abgedunkelt
+  float track = 0.0;
+  if (uTrackAmt > 0.0) {
+    float tm = 1.0 - smoothstep(uTrackRadius * 0.7, uTrackRadius, length(vWorld.xz - uTrackCenter));
+    if (tm > 0.0) {
+      float e = uTrackSize / 768.0 * 1.5;
+      float h0 = trackH(vWorld.xz);
+      float hx = trackH(vWorld.xz + vec2(e, 0.0)) - trackH(vWorld.xz - vec2(e, 0.0));
+      float hz = trackH(vWorld.xz + vec2(0.0, e)) - trackH(vWorld.xz - vec2(0.0, e));
+      n = normalize(n + vec3(hx, 0.0, hz) / (2.0 * e) * 0.035 * uTrackAmt * tm);   // Rillentiefe ~3,5 cm
+      track = h0 * tm * uTrackAmt;
+    }
+  }
   float fres = pow(1.0 - max(dot(n, v), 0.0), 3.0);
   float m = marble(vWorld.xz);
-  vec3 col = vec3(0.006, 0.003, 0.01) * (0.6 + 0.8 * m);
+  vec3 col = vec3(0.006, 0.003, 0.01) * (0.6 + 0.8 * m) * (1.0 - 0.3 * min(track, 1.0));
   // Fake-Spiegelung des Himmels (Glanz an flachen Blickwinkeln)
   vec3 r = reflect(-v, n);
   col += skyColorLite(r, uHue) * (0.02 + fres * 0.55);

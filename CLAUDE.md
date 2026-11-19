@@ -75,7 +75,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.23.0)
+## Flow Drift (Stand v0.24.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
   Himmel: Aurora-Schleier rundherum, keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
   Die Schleier sind parallel zur Lichtstrahl-Richtung `SHAFT_DIR` = normalize(0.35, 1, 0.15): Muster hängt nur vom Winkel um diese Achse ab
@@ -105,7 +105,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Intensität `fdRipples`, Frequenz `fdRipFreq` (Neigung so normiert, dass die Stärke gleich bleibt), Ausklingzeit `fdRipFade` (Hüllkurve `ripEnv`: schnell an, exponentiell aus).
   0–3 eingeschlossene Schalen (`fdLayers`) mit gravurartigen Julia-Wirbellinien; Größe `fdLayerScale` (Radius (0,8 − 0,22·k)·Skala, max. 0,95).
   Jede Schale hat eine eigene Drehung (`uShellRot[3]`, CPU): gleiche Achse wie die Kugel, Tempo 1 + (1/Radius − 1)·`fdLayerSpin` → kleinere drehen schneller.
-  Treffer-Ripples: Stößt ein Begleiter an die Hauptkugel, läuft auf beiden Kugeln ein Wellenpaket vom Kontaktpunkt um die Kugel
+  Treffer-Ripples (Hauptkugel ↔ Begleiter, Begleiter ↔ Begleiter, Landung der Hauptkugel am Boden mit Richtung nach unten): auf beiden Kugeln läuft ein Wellenpaket vom Kontaktpunkt um die Kugel
   (Front 3 rad/s, Ausklingen über `fdRipFade`, je Kugel die 2 neuesten Treffer: `uHitDir/Age/Amp[2]`, `addHit()`).
   Glitzerpunkte (`fdSurfGlit`, `GLIT_GLSL`): auf einer Schale r·1,04 (Sichtstrahl geschnitten → schweben mit Parallaxe), im Objektraum (drehen mit), je Zelle ein Punkt,
   der kurz aufblitzt; Radius bleibt immer innerhalb der Zelle (keine eckigen Kanten), sub-pixel → schwächer statt größer; Dichte ∝ Radius (`uGlitScale` = 40·r).
@@ -132,12 +132,18 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   geglätteten Boden (Feder + sanftes Auf und Ab), folgt den Hügeln weich; in der Luft kein Hangabtrieb, kein Pfad, kein Rollgeräusch.
 - Begleiter-Physik: rollen immer am Boden, magnetisch zur Hauptkugel (Zug ∝ Abstand × (1 + 0,35·Abstand), `fdMagnet`), nahe dran Bremsen relativ zur Hauptkugel;
   unabhängig von Blick/Kamera. Weiche Kollisionen (Hauptkugel schwerer, Rückprall 0,25) mit leisem räumlichem Glas-Klicken.
-  Stoß Begleiter ↔ Hauptkugel erzeugt kleine helle Splitter (`sparkChips`, Menge `fdSparks`), Goals zerplatzen in 160 Partikel (`explode`).
+  Stöße (Begleiter ↔ Hauptkugel und Begleiter untereinander) erzeugen kleine helle Splitter (`sparkChips`, Menge und Tempo nach Stoßstärke, `fdSparks`),
+  Landungen der Hauptkugel einen Partikelkranz, der vom Kontaktpunkt nach außen springt (`landBurst`), Goals zerplatzen in 160 Partikel (`explode`).
   Beide im exakt gleichen Look wie der Pfad (Größe 0,011, glitzernd), eigener Punkt-Puffer `chips`: fliegen weg, leichte Schwerkraft,
   bis zu 2 Abpraller am Boden, bleiben liegen und verglimmen (Kollision 3–6 s, Goals 5–10 s).
 - Goals schweben auf Höhe der Kugelmitte (Gelände + R), Einsammeln bei Abstand < R + 0,12 m.
 - Richtung/Kamera: Blickrichtung + rechter Stick lenkt; linker Stick dreht die Ansicht um die Kugel. `fdCam` 0 = POV über der Kugel … 1 = Third Person.
   Weltansicht = XR-Ansicht × inverse(Rig); VR-Menü mit lokaler Ansicht.
+- Spuren im Boden wie in Sand (`fdTracks` Stärke, `fdTrackLife` Dauer; `flowtrack.js`): keine Geometrie, sondern eine Höhen-Textur RGBA16F 768² für 24 m,
+  gekachelt (REPEAT) in Weltkoordinaten. Pro Frame Ping-Pong: Abklingen (exp, nach `fdTrackLife` ~5 %) und alles außerhalb 10 m um den Spieler löschen
+  (sonst Kachel-Geister), dann je Kugel ein weiches Kapsel-Segment letzte → aktuelle Position mit `MAX` einstempeln (Hauptkugel nur am Boden, Breite 0,55 r).
+  Gelände-Shader liest die Textur (3 Abtastungen, `textureLod`) → Normale gekippt (Rillentiefe ~3,5 cm) + Rille leicht dunkler, ausgeblendet 7–10 m.
+  Läuft in `prepareFrame` vor dem Binden des XR-Puffers (FFR bleibt aktiv).
 - Magische Umgebungspartikel (`fdMotes`, `moteVS/FS`): zustandslos, weltfest in einem 14-m-Bereich um die Kamera gewrappt (Rand ausgeblendet),
   steigen über 5–11 s vom Boden bis ~2,6 m auf (~30 % kleben am Boden und funkeln nur), glitzern, wenig Deckkraft → beim Durchfahren sichtbares Tempo.
 - Effekte: Partikelpfad (nur am Boden; kleine, scharfe Punkte, die glitzern: `uGlitter` → meist gedämpft, kurze helle Aufblitzer je Partikel), Warp-Ringe (starten klein, wachsen, dicht, dezent), Ribbon (blendet vor der Kamera aus), Goals, Explosionen, Flügel.
@@ -165,7 +171,8 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Himmel ≈ 10 %, Bloom ≈ 10 %, CPU < 1 ms/Frame. SwiftShader führt Verzweigungen meist voll aus → Quest-Werte mit `?profile=1` gegenprüfen.
 
 ## Gemeinsam: Display
-- Untermenü „Display“ in jeder Experience: Supersampling 100–300 % (Standard 150 %). Wird NICHT gespeichert – jede Experience/jedes Laden startet mit 150 %
+- Untermenü „Display“ in jeder Experience: Supersampling 100–300 % (Standard 150 %), Foveated rendering (0–1, Standard 0,5) und FPS-Anzeige
+  (Soothing Ripples: `foveation`, `fps`; Flow Drift zusätzlich Frame rate). Wird NICHT gespeichert – jede Experience/jedes Laden startet mit 150 %
   (`session: true` in der Einstellung). Änderung in VR legt den XR-Bildpuffer kurz nach dem letzten Reglerschritt neu an. `?scale=` setzt den Startwert.
 
 ## Entscheidungen

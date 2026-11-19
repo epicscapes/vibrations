@@ -6,6 +6,7 @@ import {
 } from './flowshaders.js';
 import { Bloom } from './flowpost.js';
 import { Profiler } from './flowprof.js';
+import { Tracks, TRACK_SIZE, TRACK_RADIUS } from './flowtrack.js';
 import { FlowAudio } from './flowsound.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 import { VRMenu } from './vrmenu.js';
@@ -79,6 +80,8 @@ const SECTIONS = [
     fdFresnel:   { label: 'Ground fresnel', min: 0, max: 1, step: 0.05, def: 0.4 },
     fdSpecRough: { label: 'Light highlight roughness', min: 0, max: 1, step: 0.05, def: 0.5 },
     fdSparks:    { label: 'Collision sparks', min: 0, max: 2, step: 0.05, def: 1 },
+    fdTracks:    { label: 'Ground tracks', min: 0, max: 2, step: 0.05, def: 1 },
+    fdTrackLife: { label: 'Track duration (s)', min: 1, max: 15, step: 0.5, def: 5 },
     fdMotes:     { label: 'Ambient sparkles', min: 0, max: 2, step: 0.05, def: 1 },
   }},
   { title: 'Atmosphere', items: {
@@ -354,6 +357,7 @@ function update(dt) {
   }
 
   driveVis += (propel - driveVis) * Math.min(dt * 4, 1);
+  trackDt += dt;
   const ripGoal = Math.min(propel * 1.4, 1);
   ripEnv = ripGoal > ripEnv ? ripEnv + (ripGoal - ripEnv) * Math.min(dt * 6, 1) : ripGoal + (ripEnv - ripGoal) * Math.exp(-dt * 3 / S.fdRipFade);
   emitTrail(dist * grounded);
@@ -402,6 +406,9 @@ function updateVertical(dt) {
   if (ball.pos[1] <= floor) {
     if (ball.vy < -1.2) {
       if (sound) sound.thud([ball.pos[0], gh, ball.pos[2]], -ball.vy / 6);
+      const strength = Math.min(-ball.vy / 6, 1);
+      addHit(ball, [0, -1, 0], Math.min(-ball.vy / 4, 1));
+      landBurst([ball.pos[0], gh + 0.02, ball.pos[2]], strength);
       ball.vy = -ball.vy * 0.22;           // kleiner Rückprall
       if (ball.vy < 0.4) ball.vy = 0;
     } else ball.vy = Math.max(ball.vy, 0);
@@ -516,19 +523,20 @@ function updateGoals(dt) {
       const j = -(1 + 0.25) * vn;                                   // Rückprall 0,25
       if (!A.main) { A.vel[0] -= nx * j * wA; A.vel[1] -= nz * j * wA; }
       B.vel[0] += nx * j * wB; B.vel[1] += nz * j * wB;
-      if (A.main && -vn > 0.08) {
-        // Ripple von der Kontaktstelle – auf der Hauptkugel und auf dem Begleiter
+      if (-vn > 0.08) {
+        // Ripple von der Kontaktstelle – auf beiden Kugeln (Hauptkugel ↔ Begleiter und Begleiter ↔ Begleiter)
         const dir = v3.norm(v3.sub(B.pos, A.pos));
         const amp = Math.min(-vn / 1.5, 1);
-        addHit(ball, dir, amp);
+        addHit(A.main ? ball : A.c, dir, amp);
         addHit(B.c, v3.scale(dir, -1), amp);
-        B.c.flashGoal = Math.min(Math.max(B.c.flashGoal || 0, 0.4 + amp), 1);
+        if (A.main) B.c.flashGoal = Math.min(Math.max(B.c.flashGoal || 0, 0.4 + amp), 1);
       }
-      if (A.main && -vn > 0.12 && time - (B.c.lastSpark || 0) > 0.15) {
-        B.c.lastSpark = time;
-        const cp = [A.pos[0] + nx * A.r, 0, A.pos[2] + nz * A.r];
-        cp[1] = terrainH(cp[0], cp[2]) + B.r;
-        sparkChips(cp, [nx, nz], Math.min(-vn / 2, 1), B.c.hue);
+      const sparkKey = A.main ? B.c : A.c;
+      if (-vn > 0.12 && time - (sparkKey['lastSpark' + (A.main ? '' : B.c.id)] || 0) > 0.15) {
+        sparkKey['lastSpark' + (A.main ? '' : B.c.id)] = time;
+        const cp = [A.pos[0] + nx * A.r, (A.pos[1] + B.pos[1]) / 2, A.pos[2] + nz * A.r];
+        if (A.main) cp[1] = terrainH(cp[0], cp[2]) + B.r;
+        sparkChips(cp, [nx, nz], Math.min(-vn / 2, 1), A.main ? B.c.hue : (A.c.hue + B.c.hue) / 2);
       }
       if (-vn > 0.25 && sound && time - (B.c.lastClick || 0) > 0.12) {
         B.c.lastClick = time;
@@ -629,6 +637,21 @@ function emitMotes(dt) {
       moteHead = (moteHead + 1) % motes.capacity;
     }
   }
+}
+
+// Aufprall auf dem Boden: Partikel springen ringförmig vom Kontaktpunkt nach außen (Look wie alle Glitzerpartikel)
+function landBurst(p, strength) {
+  if (S.fdSparks <= 0) return;
+  const count = Math.round((10 + 50 * strength) * S.fdSparks);
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = (0.5 + Math.random() * 1.3) * (0.4 + strength * 1.2);
+    const v = [Math.cos(a) * sp, (0.4 + Math.random() * 1.2) * (0.4 + strength), Math.sin(a) * sp];
+    const r0 = R * 0.6;
+    chipList.push({ p: [p[0] + Math.cos(a) * r0, p[1], p[2] + Math.sin(a) * r0], v, birth: time, life: 3 + Math.random() * 3,
+      hue: hue + 0.15 * (Math.random() - 0.5), seed: Math.random(), landed: false });
+  }
+  if (chipList.length > chips.capacity) chipList.splice(0, chipList.length - chips.capacity);
 }
 
 function sparkChips(p, n, strength, hOff = 0.25) {
@@ -746,7 +769,25 @@ function uploadGlows() {
 }
 
 let glowCount = 0;
+const trackPrev = new Map();
+let trackDt = 0;
+function updateTracks() {
+  if (!tracks.ok || S.fdTracks <= 0) return;
+  const segs = [];
+  const add = (key, x, z, w, depth, on) => {
+    const prev = trackPrev.get(key);
+    trackPrev.set(key, [x, z]);
+    if (!on || !prev || Math.hypot(x - prev[0], z - prev[1]) > 2) return;
+    segs.push({ a: prev, b: [x, z], w, depth });
+  };
+  add('ball', ball.pos[0], ball.pos[2], R * 0.55, 1, grounded > 0.5);
+  for (const c of companions) add(c.id, c.pos[0], c.pos[2], c.r * c.vis * 0.6, 0.8, !c.dying);
+  tracks.update(trackDt, [ball.pos[0], ball.pos[2]], S.fdTrackLife, segs);
+  trackDt = 0;
+}
+
 function prepareFrame(cam) {
+  updateTracks();
   uploadTrail();
   buildRibbon(cam);
   glowCount = uploadGlows();
@@ -864,6 +905,14 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uLines, S.fdLines);
   gl.uniform1f(u.uFresnel, S.fdFresnel);
   gl.uniform1f(u.uSpecRough, S.fdSpecRough);
+  gl.activeTexture(gl.TEXTURE3);
+  gl.bindTexture(gl.TEXTURE_2D, tracks.texture);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1i(u.uTrack, 3);
+  gl.uniform1f(u.uTrackAmt, tracks.ok ? S.fdTracks : 0);
+  gl.uniform1f(u.uTrackSize, TRACK_SIZE);
+  gl.uniform2f(u.uTrackCenter, ball.pos[0], ball.pos[2]);
+  gl.uniform1f(u.uTrackRadius, TRACK_RADIUS);
   gl.uniform1f(u.uAurora, S.fdAuroraInt);
   gl.uniform1f(u.uAurRefl, S.fdAurRefl);
   lightUniforms(u);
@@ -1258,6 +1307,7 @@ ui.toggle.addEventListener('click', () => ui.panel.classList.toggle('hidden'));
 if (params.get('debug')) window.__fd = { get prof() { return prof && prof.last; }, ball, goals, companions, chipList, get time() { return time; }, get sound() { return sound; } };
 
 const bloom = new Bloom(gl, program, fullscreen);
+const tracks = new Tracks(gl, program, fullscreen, emptyVao);
 
 const vrMenu = new VRMenu(gl, {
   program, sections: SECTIONS, S,

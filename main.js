@@ -86,13 +86,17 @@ const SECTIONS = [
   { title: 'Display', items: {
     // gilt nur für diese Experience und wird nicht gespeichert (jedes Laden startet mit 150 %)
     superSample: { label: 'Supersampling (%)', min: 100, max: 300, step: 10, def: 150, session: true },
+    foveation:   { label: 'Foveated rendering', min: 0, max: 1, step: 0.05, def: 0.5 },
+    fps:         { label: 'FPS', info: () => fpsText },
   }},
 ];
+let fpsText = '–';
 // Feste Werte (früher Regler)
 const FIXED = { echoSat: 0.5, echoHue: 0.2, hueShift: 1, edgeSoft: 0.6, followSpeed: 2.0 };
 
 const S = { ...FIXED };
 for (const sec of SECTIONS) for (const [k, d] of Object.entries(sec.items)) {
+  if (d.info) continue;
   let v = d.session ? d.def : load('set.' + k, d.def);
   // gespeicherte Werte, die es nicht mehr gibt (entfernte Optionen), auf Standard zurücksetzen
   if (d.options && !d.options.some(([ov]) => ov === v)) v = d.def;
@@ -454,6 +458,7 @@ let amp = 0, phase = 0, lastT = 0;
 
 function update(t) {
   const dt = lastT ? Math.min((t - lastT) / 1000, 0.05) : 1 / 72;
+  countFrame(t);
   lastT = t;
 
   hum.update();
@@ -680,7 +685,7 @@ const fxState = {};
 function decimals(step) { return step >= 1 ? 0 : Math.min(Math.ceil(-Math.log10(step)), 4); }
 
 // Browser-Eingabefelder je Einstellung, damit Änderungen aus dem VR-Menü dort sichtbar werden
-const inputs = {}, fxInputs = {};
+const inputs = {}, fxInputs = {}, infoEls = {};
 
 // Zentrale Stelle für Wertänderungen (Browser-UI und VR-Menü)
 function setSetting(key, value) {
@@ -699,14 +704,43 @@ function setEffect(key, on) {
   if (vrMenu) vrMenu.markDirty();
 }
 
+function makeLayer(session) {
+  const native = XRWebGLLayer.getNativeFramebufferScaleFactor(session) || 1;
+  const layer = new XRWebGLLayer(session, gl, { antialias: false, depth: false, framebufferScaleFactor: native * S.superSample / 100 });
+  if ('fixedFoveation' in layer) layer.fixedFoveation = S.foveation;   // Quest: Bildränder mit geringerer Auflösung
+  return layer;
+}
+function applyFoveation() {
+  const layer = xrSession && xrSession.renderState.baseLayer;
+  if (layer && 'fixedFoveation' in layer) layer.fixedFoveation = S.foveation;
+}
+// FPS (Mittel über 0,5 s) für die Anzeige im Menü „Display“
+let fpsFrames = 0, fpsT0 = 0, fpsWorst = 0, fpsLast = 0;
+function countFrame(t) {
+  const frameMs = fpsLast ? t - fpsLast : 0;
+  fpsLast = t;
+  if (!fpsT0) fpsT0 = t;
+  fpsFrames++;
+  fpsWorst = Math.max(fpsWorst, frameMs);
+  if (t - fpsT0 >= 500) {
+    const fps = fpsFrames * 1000 / (t - fpsT0);
+    const layer = xrSession && xrSession.renderState.baseLayer;
+    const rate = xrSession && xrSession.frameRate ? ` / ${Math.round(xrSession.frameRate)} Hz` : '';
+    const ffr = !layer ? '' : ('fixedFoveation' in layer && layer.fixedFoveation != null) ? ` · FFR ${(+layer.fixedFoveation).toFixed(2)}` : ' · FFR n/a';
+    fpsText = `${fps.toFixed(0)} fps${rate} · max ${fpsWorst.toFixed(0)} ms${ffr}`;
+    fpsFrames = 0; fpsT0 = t; fpsWorst = 0;
+    vrMenu.refreshInfo();
+    if (infoEls.fps) infoEls.fps.textContent = fpsText;
+  }
+}
+
 // Supersampling während der VR-Sitzung ändern: Bildpuffer neu anlegen (kurz nach dem letzten Reglerschritt)
 let scaleTimer = null;
 function applySupersampling() {
   clearTimeout(scaleTimer);
   scaleTimer = setTimeout(() => {
     if (!xrSession) return;
-    const native = XRWebGLLayer.getNativeFramebufferScaleFactor(xrSession) || 1;
-    const layer = new XRWebGLLayer(xrSession, gl, { antialias: false, depth: false, framebufferScaleFactor: native * S.superSample / 100 });
+    const layer = makeLayer(xrSession);
     xrSession.updateRenderState({ baseLayer: layer });
     ui.status.textContent = `XR framebuffer: ${layer.framebufferWidth}×${layer.framebufferHeight} (${S.superSample} %)`;
   }, 350);
@@ -714,6 +748,7 @@ function applySupersampling() {
 
 function applySetting(key) {
   if (key === 'superSample') applySupersampling();
+  if (key === 'foveation') applyFoveation();
   if (key === 'simRes') setSimRes(S.simRes);
   if (key === 'fracRes' || key === 'fracCount') setFracLayers(S.fracRes, S.fracCount);
   if (!fx) return;
@@ -758,6 +793,14 @@ SECTIONS.forEach((sec, i) => {
     const val = document.createElement('span');
     val.className = 'val';
     let input;
+    if (d.info) {                                   // reine Anzeige (FPS)
+      val.textContent = d.info();
+      val.style.minWidth = '14em';
+      infoEls[key] = val;
+      row.append(name, val);
+      body.append(row);
+      continue;
+    }
     if (d.options) {
       input = document.createElement('select');
       for (const [v, text] of d.options) input.add(new Option(text, v));
@@ -820,16 +863,16 @@ async function initXR() {
 }
 
 async function startXR() {
-  const session = await navigator.xr.requestSession('immersive-vr');
+  // Quest: Foveation-Stufe schon beim Start anfordern (zusätzlich zu fixedFoveation am Layer)
+  const fv = S.foveation;
+  const ffr = fv >= 0.75 ? 'high-fixed-foveation-level' : fv >= 0.4 ? 'medium-fixed-foveation-level' : fv > 0 ? 'low-fixed-foveation-level' : null;
+  let session;
+  try { session = await navigator.xr.requestSession('immersive-vr', ffr ? { optionalFeatures: [ffr] } : {}); }
+  catch { session = await navigator.xr.requestSession('immersive-vr'); }
   xrSession = session;
   await gl.makeXRCompatible();
 
-  const native = XRWebGLLayer.getNativeFramebufferScaleFactor(session) || 1;
-  const layer = new XRWebGLLayer(session, gl, {
-    antialias: false,
-    depth: false,
-    framebufferScaleFactor: native * S.superSample / 100,
-  });
+  const layer = makeLayer(session);
   session.updateRenderState({ baseLayer: layer, depthNear: 0.1, depthFar: 100 });
   refSpace = await session.requestReferenceSpace('local');
 
