@@ -49,6 +49,7 @@ const SECTIONS = [
     fdCompanion: { label: 'Companion chance', min: 0, max: 1, step: 0.05, def: 0.35 },
     fdMagnet:    { label: 'Companion magnet', min: 0.5, max: 8, step: 0.25, def: 2.5 },
     fdCompBright: { label: 'Companion brightness', min: 0.2, max: 2.5, step: 0.05, def: 1 },
+    fdCompGlass:  { label: 'Companion glass material', toggle: true, def: true },
   }},
   { title: 'Camera', items: {
     fdCam:  { label: 'POV ↔ third person', min: 0, max: 1, step: 0.01, def: 0.75 },
@@ -61,6 +62,7 @@ const SECTIONS = [
     fdIOR:      { label: 'Refraction (IOR)', min: 1, max: 2.2, step: 0.01, def: 1.4 },
     fdRough:    { label: 'Roughness', min: 0, max: 1, step: 0.05, def: 0.25 },
     fdBallFresnel: { label: 'Ball fresnel', min: 0, max: 3, step: 0.05, def: 1.2 },
+    fdSurfGlit:   { label: 'Surface sparkles', min: 0, max: 2, step: 0.05, def: 1 },
     fdLayers:   { label: 'Inner layers', min: 0, max: 3, step: 1, def: 3 },
     fdLayerScale: { label: 'Inner layer scale', min: 0.3, max: 1.2, step: 0.05, def: 1 },
     fdLayerSpin:  { label: 'Inner layer spin', min: 0, max: 2, step: 0.05, def: 1 },
@@ -98,10 +100,13 @@ const SECTIONS = [
     superSample: { label: 'Supersampling (%)', min: 100, max: 300, step: 10, def: 150, session: true },
     fdFoveation: { label: 'Foveated rendering', min: 0, max: 1, step: 0.05, def: 0.5 },
     fdFrameRate: { label: 'Frame rate', options: [[72, '72 Hz'], [90, '90 Hz'], [120, '120 Hz']], def: 72 },
+    fdFps:       { label: 'FPS', info: () => fpsText },
   }},
 ];
 const S = {};
+let fpsText = '–';
 for (const sec of SECTIONS) for (const [k, d] of Object.entries(sec.items)) {
+  if (d.info) continue;
   let v = d.session ? d.def : load('set.' + k, d.def);
   if (d.options && !d.options.some(([ov]) => ov === v)) v = d.def;
   if (d.min !== undefined && !(v >= d.min && v <= d.max)) v = d.def;
@@ -511,6 +516,13 @@ function updateGoals(dt) {
       const j = -(1 + 0.25) * vn;                                   // Rückprall 0,25
       if (!A.main) { A.vel[0] -= nx * j * wA; A.vel[1] -= nz * j * wA; }
       B.vel[0] += nx * j * wB; B.vel[1] += nz * j * wB;
+      if (A.main && -vn > 0.08) {
+        // Ripple von der Kontaktstelle – auf der Hauptkugel und auf dem Begleiter
+        const dir = v3.norm(v3.sub(B.pos, A.pos));
+        const amp = Math.min(-vn / 1.5, 1);
+        addHit(ball, dir, amp);
+        addHit(B.c, v3.scale(dir, -1), amp);
+      }
       if (A.main && -vn > 0.12 && time - (B.c.lastSpark || 0) > 0.15) {
         B.c.lastSpark = time;
         const cp = [A.pos[0] + nx * A.r, 0, A.pos[2] + nz * A.r];
@@ -528,6 +540,10 @@ function updateGoals(dt) {
     // Verschwinden (ältester bei mehr als MAX_COMPANIONS): klein skalieren, Licht ausblenden
     if (c.dying) { c.scale -= dt / 1.2; if (c.scale <= 0) { companions.splice(k, 1); continue; } }
     // Schnurr-Vibration: Größe und Helligkeit wackeln leicht (schnelles Zittern × langsames Atmen)
+    const cs = Math.hypot(c.vel[0], c.vel[1]);
+    const rg = Math.min(cs / 2.5, 1);
+    c.ripEnv = rg > (c.ripEnv || 0) ? c.ripEnv + (rg - c.ripEnv) * Math.min(dt * 6, 1) : rg + ((c.ripEnv || 0) - rg) * Math.exp(-dt * 3 / S.fdRipFade);
+    if (cs > 0.05) c.moveDir = [c.vel[0] / cs, c.vel[1] / cs];
     const purr = Math.sin(time * c.buzz) * (0.6 + 0.4 * Math.sin(time * c.breath + c.phase));
     c.vis = c.scale * (1 + 0.035 * purr);
     c.glow = c.bright * (1 + 0.12 * purr) * c.scale;
@@ -574,6 +590,27 @@ function explode(p, h) {
     chipList.push({ p: [...p], v: d, birth: time, life: 5 + Math.random() * 5, hue: h, seed: Math.random(), landed: false });
   }
   if (chipList.length > chips.capacity) chipList.splice(0, chipList.length - chips.capacity);
+}
+
+// Treffer-Ripple merken (je Kugel die 2 neuesten); kurz hintereinander am selben Ort -> nur verstärken
+function addHit(o, dir, amp) {
+  o.hits = o.hits || [];
+  const last = o.hits[o.hits.length - 1];
+  if (last && time - last.t < 0.12 && v3.dot(last.dir, dir) > 0.8) { last.amp = Math.min(Math.max(last.amp, amp), 1); return; }
+  o.hits.push({ dir, t: time, amp });
+  if (o.hits.length > 2) o.hits.shift();
+}
+const hitBuf = { dir: new Float32Array(6), age: new Float32Array(2), amp: new Float32Array(2) };
+function hitUniforms(u, o) {
+  hitBuf.amp.fill(0);
+  (o.hits || []).forEach((h, i) => {
+    hitBuf.dir.set(h.dir, i * 3);
+    hitBuf.age[i] = time - h.t;
+    hitBuf.amp[i] = time - h.t < S.fdRipFade * 3 ? h.amp * S.fdRipples : 0;
+  });
+  gl.uniform3fv(u['uHitDir[0]'], hitBuf.dir);
+  gl.uniform1fv(u['uHitAge[0]'], hitBuf.age);
+  gl.uniform1fv(u['uHitAmp[0]'], hitBuf.amp);
 }
 
 // Kleine helle Splitter am Kontaktpunkt: springen seitlich/aufwärts weg, landen und glimmen kurz am Boden
@@ -734,6 +771,20 @@ function lightUniforms(u) {
   gl.uniform3fv(u['uLightCol[0]'], col);
 }
 
+// gemeinsame Uniforms des Glas-Shaders (Hauptkugel + Begleiter)
+function glassCommon(u, proj, view, cam) {
+  gl.uniformMatrix4fv(u.uProj, false, proj);
+  gl.uniformMatrix4fv(u.uView, false, view);
+  gl.uniform3fv(u.uCam, cam);
+  gl.uniform1f(u.uTime, time);
+  gl.uniform1f(u.uIOR, S.fdIOR);
+  gl.uniform1f(u.uRough, S.fdRough);
+  gl.uniform1f(u.uFresnel, S.fdBallFresnel);
+  gl.uniform1f(u.uAurora, S.fdAuroraInt);
+  gl.uniform1f(u.uRipFreq, S.fdRipFreq);
+  gl.uniform1f(u.uRipFade, S.fdRipFade);
+  gl.uniform1f(u.uGlit, S.fdSurfGlit);
+}
 function drawSphere(u, pos, r, rot) {
   gl.uniform3fv(u.uPos, pos);
   gl.uniform1f(u.uR, r);
@@ -760,13 +811,33 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   // Begleiter: leuchtende Kugeln (deckend)
   mark('companions');
   gl.bindVertexArray(sphereMesh.vao);
-  if (companions.length) {
+  if (companions.length && S.fdCompGlass) {
+    // gleiches Glas wie die Hauptkugel, ohne innere Schalen; Innenlicht = Leuchten des Begleiters
+    u = P.ball.u;
+    gl.useProgram(P.ball.p);
+    glassCommon(u, proj, view, cam);
+    gl.uniform1i(u.uLayers, 0);
+    gl.uniform1i(u.uIter, 1);
+    for (const c of companions) {
+      gl.uniform1f(u.uHue, hue + c.hue);
+      gl.uniform1f(u.uLight, 1.1 * c.glow * S.fdCompBright);
+      const md = c.moveDir || [1, 0];
+      gl.uniform3f(u.uEmit, -md[0], 0, -md[1]);
+      gl.uniform1f(u.uRipple, S.fdRipples * (c.ripEnv || 0));
+      gl.uniform1f(u.uGlitScale, 40 * c.r);
+      hitUniforms(u, c);
+      drawSphere(u, c.pos, c.r * c.vis, c.rot);
+    }
+  } else if (companions.length) {
     u = P.comp.u;
     gl.useProgram(P.comp.p);
     gl.uniformMatrix4fv(u.uProj, false, proj);
     gl.uniformMatrix4fv(u.uView, false, view);
     gl.uniform3fv(u.uCam, cam);
+    gl.uniform1f(u.uTime, time);
+    gl.uniform1f(u.uGlit, S.fdSurfGlit);
     for (const c of companions) {
+      gl.uniform1f(u.uGlitScale, 40 * c.r);
       gl.uniform1f(u.uHue, hue + c.hue);
       gl.uniform1f(u.uBright, c.glow * S.fdCompBright);
       drawSphere(u, c.pos, c.r * c.vis, c.rot);
@@ -776,22 +847,16 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   mark('ball');
   u = P.ball.u;
   gl.useProgram(P.ball.p);
-  gl.uniformMatrix4fv(u.uProj, false, proj);
-  gl.uniformMatrix4fv(u.uView, false, view);
-  gl.uniform3fv(u.uCam, cam);
+  glassCommon(u, proj, view, cam);
   gl.uniform1f(u.uHue, hue);
-  gl.uniform1f(u.uTime, time);
   gl.uniform1f(u.uLight, 0.45 + 0.55 * driveVis);
-  gl.uniform1f(u.uIOR, S.fdIOR);
-  gl.uniform1f(u.uRough, S.fdRough);
-  gl.uniform1f(u.uFresnel, S.fdBallFresnel);
   gl.uniform1i(u.uLayers, S.fdLayers);
   gl.uniform1f(u.uShellScale, S.fdLayerScale);
   gl.uniformMatrix3fv(u['uShellRot[0]'], false, shellRotData());
-  gl.uniform1f(u.uAurora, S.fdAuroraInt);
   gl.uniform3f(u.uEmit, -moveDir[0], 0, -moveDir[1]);
   gl.uniform1f(u.uRipple, S.fdRipples * ripEnv);
-  gl.uniform1f(u.uRipFreq, S.fdRipFreq);
+  gl.uniform1f(u.uGlitScale, 40 * R);
+  hitUniforms(u, ball);
   // groß im Bild (POV) -> weniger Fraktal-Iterationen (Linien bleiben, feinste Ausläufer fallen weg)
   const ballPx = R / Math.max(v3.len(v3.sub(ball.pos, cam)), 0.05) * pxScale;
   gl.uniform1i(u.uIter, Math.round(22 - 6 * Math.min(Math.max((ballPx - 150) / 450, 0), 1)));
@@ -1009,6 +1074,7 @@ function setPreview(on) {
 function previewFrame(t) {
   if (xrSession || !previewOn) { previewRunning = false; return; }
   const dt = lastT ? Math.min((t - lastT) / 1000, 0.05) : 1 / 60;
+  countFrame(t, lastT ? t - lastT : 0);
   lastT = t;
   const dpr = window.devicePixelRatio || 1;
   const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
@@ -1050,7 +1116,7 @@ addEventListener('keyup', (e) => { keys.delete(e.key.toLowerCase()); });
 
 // ---------- Einstellungs-Oberfläche (wie in Soothing Ripples) ----------
 const fxState = {};
-const inputs = {}, fxInputs = {};
+const inputs = {}, fxInputs = {}, infoEls = {};
 function decimals(step) { return step >= 1 ? 0 : Math.min(Math.ceil(-Math.log10(step)), 4); }
 
 // Supersampling während der VR-Sitzung ändern: Bildpuffer neu anlegen (kurz nach dem letzten Reglerschritt)
@@ -1064,6 +1130,28 @@ function makeLayer(session) {
 function applyFoveation() {
   const layer = xrSession && xrSession.renderState.baseLayer;
   if (layer && 'fixedFoveation' in layer) layer.fixedFoveation = S.fdFoveation;
+}
+// Status für die FPS-Zeile: wird Foveation unterstützt und welcher Wert ist aktiv?
+function ffrStatus() {
+  const layer = xrSession && xrSession.renderState.baseLayer;
+  if (!layer) return '';
+  if (!('fixedFoveation' in layer) || layer.fixedFoveation === null || layer.fixedFoveation === undefined) return ' · FFR n/a';
+  return ` · FFR ${(+layer.fixedFoveation).toFixed(2)}`;
+}
+// FPS: Mittel über 0,5 s, auch im Menü „Display“ sichtbar
+let fpsFrames = 0, fpsT0 = 0, fpsWorst = 0;
+function countFrame(nowMs, frameMs) {
+  if (!fpsT0) fpsT0 = nowMs;
+  fpsFrames++;
+  fpsWorst = Math.max(fpsWorst, frameMs || 0);
+  if (nowMs - fpsT0 >= 500) {
+    const fps = fpsFrames * 1000 / (nowMs - fpsT0);
+    const rate = xrSession && xrSession.frameRate ? ` / ${Math.round(xrSession.frameRate)} Hz` : '';
+    fpsText = `${fps.toFixed(0)} fps${rate} · max ${fpsWorst.toFixed(0)} ms${ffrStatus()}`;
+    fpsFrames = 0; fpsT0 = nowMs; fpsWorst = 0;
+    if (vrMenu) vrMenu.refreshInfo();
+    if (infoEls.fdFps) infoEls.fdFps.textContent = fpsText;
+  }
 }
 // Bildwiederholrate: gewünschten Wert oder den nächstliegenden unterstützten
 async function applyFrameRate() {
@@ -1146,6 +1234,14 @@ SECTIONS.forEach((sec, i) => {
     const val = document.createElement('span');
     val.className = 'val';
     let input;
+    if (d.info) {                                   // reine Anzeige (z. B. FPS)
+      val.textContent = d.info();
+      val.style.minWidth = '14em';
+      infoEls[key] = val;
+      row.append(name, val);
+      body.append(row);
+      continue;
+    }
     if (d.options) {
       input = document.createElement('select');
       for (const [v, text] of d.options) input.add(new Option(text, v));
@@ -1211,7 +1307,12 @@ async function initXR() {
 
 async function startXR() {
   ensureSound();   // noch innerhalb des Klicks, damit Audio starten darf
-  const session = await navigator.xr.requestSession('immersive-vr');
+  // Quest: Foveation-Stufe schon beim Start anfordern (zusätzlich zum Laufzeit-Attribut fixedFoveation)
+  const fov = S.fdFoveation;
+  const ffr = fov >= 0.75 ? 'high-fixed-foveation-level' : fov >= 0.4 ? 'medium-fixed-foveation-level' : fov > 0 ? 'low-fixed-foveation-level' : null;
+  let session;
+  try { session = await navigator.xr.requestSession('immersive-vr', ffr ? { optionalFeatures: [ffr] } : {}); }
+  catch { session = await navigator.xr.requestSession('immersive-vr'); }
   xrSession = session;
   await gl.makeXRCompatible();
   session.updateRenderState({ baseLayer: makeLayer(session), depthNear: 0.05, depthFar: 200 });
@@ -1233,6 +1334,7 @@ function xrFrame(t, frame) {
   const pose = frame.getViewerPose(refSpace);
   if (!pose) return;
   const dt = lastT ? Math.min((t - lastT) / 1000, 0.05) : 1 / 72;
+  countFrame(t, lastT ? t - lastT : 0);
   lastT = t;
 
   const hp = pose.transform.position, ho = pose.transform.orientation;

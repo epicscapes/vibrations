@@ -61,6 +61,11 @@ export class VRMenu {
   }
 
   markDirty() { this.dirty = true; }
+  // offene Sektion mit Anzeige-Zeilen? -> neu zeichnen (vom Aufrufer gedrosselt)
+  refreshInfo() {
+    const sec = this.sections[this.openSection];
+    if (sec && Object.values(sec.items).some((d) => d.info)) this.dirty = true;
+  }
 
   redraw() {
     const g = this.ctx, rows = this.rows();
@@ -83,6 +88,11 @@ export class VRMenu {
       g.fillText(row.label, 30, cy, SLIDER_X - 44);
       if (row.type === 'fx') { checkbox(g, SLIDER_X, cy, this.fx.get(row.key)); return; }
       const d = row.d, v = this.S[row.key];
+      if (d.info) {                                   // reine Anzeige (z. B. FPS)
+        g.fillStyle = C.accent;
+        g.fillText(d.info(), SLIDER_X, cy, W - SLIDER_X - 20);
+        return;
+      }
       if (d.toggle) { checkbox(g, SLIDER_X, cy, v); return; }
       if (d.options) {
         const opt = d.options.find(([ov]) => ov === v);
@@ -172,6 +182,7 @@ export class VRMenu {
     } else if (pressed && row) {
       if (row.type === 'section') { this.openSection = this.openSection === row.i ? -1 : row.i; }
       else if (row.type === 'fx') { this.fx.set(row.key, !this.fx.get(row.key)); }
+      else if (row.d.info) { /* nur Anzeige */ }
       else if (row.d.toggle) { this.onChange(row.key, !this.S[row.key]); }
       else if (row.d.options) {
         const opts = row.d.options, i = opts.findIndex(([ov]) => ov === this.S[row.key]);

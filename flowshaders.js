@@ -193,12 +193,12 @@ void main() {
     if (i >= uLightCount) break;
     vec3 L = uLightPos[i] - vWorld;
     float d2 = dot(L, L);
-    if (d2 > 144.0) continue;                         // nur in Reichweite (12 m, weich auslaufend)
+    if (d2 > 9.0) continue;                           // nur in Reichweite (3 m, weich ab 2 m)
     vec3 l = L * inversesqrt(d2);
     // Licht sitzt dicht über dem Boden: weich umgreifendes Kontaktlicht statt reinem Lambert
     float diff = clamp(dot(n, l) * 0.6 + 0.4, 0.0, 1.0) / (1.0 + d2 * 2.2);
     float spec = pow(max(dot(rr, l), 0.0), specExp) * specNorm / (1.0 + d2 * 0.25);
-    col += uLightCol[i] * (diff * 0.9 + spec * 0.55 * (0.5 + m)) * (1.0 - smoothstep(81.0, 144.0, d2));
+    col += uLightCol[i] * (diff * 0.9 + spec * 0.55 * (0.5 + m)) * (1.0 - smoothstep(4.0, 9.0, d2));
   }
 
   // dezenter Fresnel-Saum in Szenenfarbe (Hügelkanten lesbarer)
@@ -226,6 +226,25 @@ void main() {
 }`;
 
 // ---------- Kugeln: gläsern, dunkle Wirbel (Julia), Innenlicht, dezenter Rand ----------
+const GLIT_GLSL = `
+// Glitzerpunkte auf der Kugeloberfläche: Zellen im Objektraum (drehen mit der Kugel), je Zelle ein Punkt,
+// der kurz aufblitzt (eigene Phase/Tempo) – wie die Glitzerpartikel am Boden, ohne eigene Bewegung.
+uniform float uGlit;        // Stärke (0 = aus)
+uniform float uGlitScale;   // Zellen je Einheit Objektraum (~ Radius × 40 -> ähnliche Dichte auf allen Kugeln)
+float glitHash(vec3 p) { p = fract(p * vec3(0.1031, 0.1030, 0.0973)); p += dot(p, p.yxz + 33.33); return fract((p.x + p.y) * p.z); }
+float surfaceGlitter(vec3 q, float t) {
+  vec3 p = q * uGlitScale;
+  vec3 cell = floor(p);
+  float h = glitHash(cell);
+  if (h > 0.55) return 0.0;                              // nur ein Teil der Zellen hat einen Punkt
+  vec3 c = cell + 0.25 + 0.5 * vec3(glitHash(cell + 1.7), glitHash(cell + 4.1), glitHash(cell + 8.3));
+  float d = length(p - c);
+  float aa = fwidth(d) + 0.02;
+  float dotv = 1.0 - smoothstep(0.0, 0.09 + aa, d);
+  float tw = 0.5 + 0.5 * sin(t * (2.0 + h * 9.0) + h * 60.0);
+  return dotv * pow(tw, 14.0) * 2.5;                    // sehr kurze Lebenszeit: blitzt auf und verlischt
+}`;
+
 export const ballVS = `#version 300 es
 in vec2 aPos;
 uniform mat4 uProj;
@@ -265,6 +284,10 @@ uniform mat3 uShellRot[3]; // eigene Drehung je Schale (kleinere drehen schnelle
 uniform vec3 uEmit;        // Richtung der Ripple-Quelle (hinten, Welt)
 uniform float uRipple;     // Ripple-Stärke (bereits mit Ausklingzeit geglättet)
 uniform float uRipFreq;    // Ripple-Frequenz
+uniform float uRipFade;    // Ausklingzeit (s) der Treffer-Ripples
+uniform vec3 uHitDir[2];   // Treffer-Ripples: Richtung des Kontaktpunkts (Welt)
+uniform float uHitAge[2];  // Alter (s)
+uniform float uHitAmp[2];  // Stärke (0 = keiner)
 uniform int uIter;         // Julia-Iterationen (weniger, wenn die Kugel groß im Bild ist)
 in vec3 vObj;
 in vec3 vN;
@@ -274,6 +297,7 @@ ${COLOR_GLSL}
 ${BASE_GLSL}
 ${SKY_GLSL}
 ${DITHER_GLSL}
+${GLIT_GLSL}
 vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 float julia(vec2 z, vec2 c) {
   for (int i = 0; i < 22; i++) {
@@ -335,15 +359,28 @@ void main() {
   vec3 v = normalize(uCam - vWorld);
   if (dot(n, v) < 0.0) discard;
 
-  // Ripples: laufen von der Quelle hinten über die Oberfläche
-  float c = clamp(dot(n, uEmit), -1.0, 1.0);
-  float th = acos(c);
-  float ph = th * uRipFreq - uTime * 9.0;
-  float env = exp(-th * 2.4) * uRipple;
-  float dh = (cos(ph) * uRipFreq - 2.4 * sin(ph)) * env;
-  vec3 g = c * n - uEmit;
-  float gl = length(g);
-  vec3 nr = gl > 1e-4 ? normalize(n - g / gl * dh * 0.012 * 14.0 / uRipFreq) : n;
+  // Ripples: Antrieb (von hinten über die Oberfläche) + Treffer (Wellenpaket läuft vom Kontaktpunkt um die Kugel)
+  vec3 tilt = vec3(0.0);
+  if (uRipple > 0.001) {
+    float c = clamp(dot(n, uEmit), -1.0, 1.0);
+    float th = acos(c);
+    float ph = th * uRipFreq - uTime * 9.0;
+    float env = exp(-th * 2.4) * uRipple;
+    float dh = (cos(ph) * uRipFreq - 2.4 * sin(ph)) * env;
+    vec3 g = c * n - uEmit; float gl = length(g);
+    if (gl > 1e-4) tilt += g / gl * dh;
+  }
+  for (int i = 0; i < 2; i++) {
+    if (uHitAmp[i] <= 0.001) continue;
+    float c = clamp(dot(n, uHitDir[i]), -1.0, 1.0);
+    float th = acos(c);
+    float d = th - uHitAge[i] * 3.0;                         // Front läuft in ~1 s bis zur Rückseite
+    float env = uHitAmp[i] * exp(-uHitAge[i] * 3.0 / uRipFade) * exp(-d * d * 2.5);
+    float dh = cos(d * uRipFreq) * uRipFreq * env;
+    vec3 g = c * n - uHitDir[i]; float gl = length(g);
+    if (gl > 1e-4) tilt += g / gl * dh;
+  }
+  vec3 nr = normalize(n - tilt * 0.012 * 14.0 / uRipFreq);
 
   float f0 = pow((uIOR - 1.0) / (uIOR + 1.0), 2.0);
   vec3 inside = traceInside(v, nr, uRough);
@@ -354,6 +391,7 @@ void main() {
   col += vec3(1.0, 0.85, 0.95) * pow(max(dot(reflect(-v, nr), l), 0.0), mix(80.0, 12.0, uRough)) * 0.3 * (1.0 - uRough * 0.6);
   float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
   col += mix(hueShift(AUR_LOW, uHue), hueShift(AUR_HIGH, uHue), 0.5) * rim * 0.35 * uFresnel;
+  if (uGlit > 0.0) col += mix(hueShift(GLOW, uHue), vec3(1.0, 0.9, 1.0), 0.5) * surfaceGlitter(vObj, uTime) * uGlit;
   o = vec4(dither(col), 1.0);
 }`;
 
@@ -363,12 +401,14 @@ precision highp float;
 uniform vec3 uCam;
 uniform float uHue;
 uniform float uBright;   // Helligkeit je Begleiter (inkl. Schnurr-Vibration)
+uniform float uTime;
 in vec3 vObj;
 in vec3 vN;
 in vec3 vWorld;
 out vec4 o;
 ${COLOR_GLSL}
 ${BASE_GLSL}
+${GLIT_GLSL}
 void main() {
   vec3 n = normalize(vN);
   vec3 v = normalize(uCam - vWorld);
@@ -383,7 +423,9 @@ void main() {
   vec3 c = mix(rim, core, coreAmt) * (0.85 + 0.15 * nv);
   float l = dot(c, vec3(0.299, 0.587, 0.114));
   c = max(mix(vec3(l), c, 1.0 + 0.6 * clamp(1.0 - b, 0.0, 1.0)), 0.0);   // Sättigung beim Dimmen anheben
-  o = vec4(c * b, 1.0);
+  c = c * b;
+  if (uGlit > 0.0) c += vec3(1.0, 0.92, 1.0) * surfaceGlitter(vObj, uTime) * uGlit * 0.6;
+  o = vec4(c, 1.0);
 }`;
 
 // ---------- Funken: schimmernder Pfad und Explosionen ----------
