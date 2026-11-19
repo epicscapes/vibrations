@@ -4,9 +4,9 @@
 // dann je Kugel ein weiches Kapsel-Segment (letzte -> aktuelle Position) mit MAX einstempeln.
 // Der Gelände-Shader liest die Textur und kippt damit die Normale (Bump) und dunkelt die Rille leicht ab.
 
-export const TRACK_SIZE = 24;     // m, Kantenlänge der Kachel
-export const TRACK_RES = 768;     // Texel (≈ 3,1 cm)
-export const TRACK_RADIUS = 10;   // m um den Spieler; außerhalb gelöscht und unsichtbar
+export const TRACK_SIZE = 16;     // m, Kantenlänge der Kachel
+export const TRACK_RES = 512;     // Texel (≈ 3,1 cm – gleiche Detailschärfe wie vorher auf kleinerer Fläche)
+export const TRACK_RADIUS = 6.5;  // m um den Spieler; außerhalb gelöscht, ab ~4,5 m weich ausgeblendet (muss < TRACK_SIZE/2 sein)
 
 const vs = `#version 300 es
 layout(location = 0) in vec2 aPos;

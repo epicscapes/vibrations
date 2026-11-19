@@ -183,9 +183,9 @@ void main() {
   // Spuren: Rille als Bump (Normale kippen), leicht abgedunkelt
   float track = 0.0;
   if (uTrackAmt > 0.0) {
-    float tm = 1.0 - smoothstep(uTrackRadius * 0.7, uTrackRadius, length(vWorld.xz - uTrackCenter));
+    float tm = 1.0 - smoothstep(uTrackRadius * 0.6, uTrackRadius * 0.95, length(vWorld.xz - uTrackCenter));
     if (tm > 0.0) {
-      float e = uTrackSize / 768.0 * 1.5;
+      float e = uTrackSize / 512.0 * 1.5;
       float h0 = trackH(vWorld.xz);
       float hx = trackH(vWorld.xz + vec2(e, 0.0)) - trackH(vWorld.xz - vec2(e, 0.0));
       float hz = trackH(vWorld.xz + vec2(0.0, e)) - trackH(vWorld.xz - vec2(0.0, e));

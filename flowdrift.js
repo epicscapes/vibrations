@@ -82,6 +82,7 @@ const SECTIONS = [
     fdSparks:    { label: 'Collision sparks', min: 0, max: 2, step: 0.05, def: 1 },
     fdTracks:    { label: 'Ground tracks', min: 0, max: 2, step: 0.05, def: 1 },
     fdTrackLife: { label: 'Track duration (s)', min: 1, max: 15, step: 0.5, def: 5 },
+    fdTrackEvery: { label: 'Track update', options: [[1, 'Every frame'], [2, 'Every 2nd frame'], [3, 'Every 3rd frame']], def: 2 },
     fdMotes:     { label: 'Ambient sparkles', min: 0, max: 2, step: 0.05, def: 1 },
   }},
   { title: 'Atmosphere', items: {
@@ -771,8 +772,11 @@ function uploadGlows() {
 let glowCount = 0;
 const trackPrev = new Map();
 let trackDt = 0;
+let trackFrame = 0;
 function updateTracks() {
   if (!tracks.ok || S.fdTracks <= 0) return;
+  // nur jeden n-ten Frame: Abklingen nutzt die aufgelaufene Zeit, Segmente verbinden die Positionen seit dem letzten Update
+  if (++trackFrame % S.fdTrackEvery) return;
   const segs = [];
   const add = (key, x, z, w, depth, on) => {
     const prev = trackPrev.get(key);

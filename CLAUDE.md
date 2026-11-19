@@ -139,10 +139,11 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Goals schweben auf Höhe der Kugelmitte (Gelände + R), Einsammeln bei Abstand < R + 0,12 m.
 - Richtung/Kamera: Blickrichtung + rechter Stick lenkt; linker Stick dreht die Ansicht um die Kugel. `fdCam` 0 = POV über der Kugel … 1 = Third Person.
   Weltansicht = XR-Ansicht × inverse(Rig); VR-Menü mit lokaler Ansicht.
-- Spuren im Boden wie in Sand (`fdTracks` Stärke, `fdTrackLife` Dauer; `flowtrack.js`): keine Geometrie, sondern eine Höhen-Textur RGBA16F 768² für 24 m,
-  gekachelt (REPEAT) in Weltkoordinaten. Pro Frame Ping-Pong: Abklingen (exp, nach `fdTrackLife` ~5 %) und alles außerhalb 10 m um den Spieler löschen
+- Spuren im Boden wie in Sand (`fdTracks` Stärke, `fdTrackLife` Dauer, `fdTrackEvery` Update jeden 1./2./3. Frame, Standard 2; `flowtrack.js`):
+  keine Geometrie, sondern eine Höhen-Textur RGBA16F 512² für 16 m (≈ 3,1 cm/Texel),
+  gekachelt (REPEAT) in Weltkoordinaten. Pro Frame Ping-Pong: Abklingen (exp, nach `fdTrackLife` ~5 %) und alles außerhalb 6,5 m um den Spieler löschen
   (sonst Kachel-Geister), dann je Kugel ein weiches Kapsel-Segment letzte → aktuelle Position mit `MAX` einstempeln (Hauptkugel nur am Boden, Breite 0,55 r).
-  Gelände-Shader liest die Textur (3 Abtastungen, `textureLod`) → Normale gekippt (Rillentiefe ~3,5 cm) + Rille leicht dunkler, ausgeblendet 7–10 m.
+  Gelände-Shader liest die Textur (3 Abtastungen, `textureLod`) → Normale gekippt (Rillentiefe ~3,5 cm) + Rille leicht dunkler, weich ausgeblendet 3,9–6,2 m.
   Läuft in `prepareFrame` vor dem Binden des XR-Puffers (FFR bleibt aktiv).
 - Magische Umgebungspartikel (`fdMotes`, `moteVS/FS`): zustandslos, weltfest in einem 14-m-Bereich um die Kamera gewrappt (Rand ausgeblendet),
   steigen über 5–11 s vom Boden bis ~2,6 m auf (~30 % kleben am Boden und funkeln nur), glitzern, wenig Deckkraft → beim Durchfahren sichtbares Tempo.
@@ -158,7 +159,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Gelände-Shader rechnet zuerst den Nebel und bricht bei vollständig vernebelten Pixeln ab; Kugel-Lichter nur bis 3 m (weich ab 2 m);
   Körnung nur < 10 m, Höhenlinien nur < 30 m; Himmels-Spiegelung von Boden und Murmel-Hintergrund mit `skyColorLite` (ohne feine Schleier-Schicht).
   Murmel: Julia-Iterationen 22 → 16, je größer die Kugel im Bild (150–600 px Radius, `uIter`).
-  Display-Menü: „Foveated rendering“ (`fdFoveation`, 0–1, Standard 0,5 → `XRWebGLLayer.fixedFoveation`; wirkt nicht bei Bloom, da die Szene dann in einen eigenen Puffer geht),
+  Display-Menü: „Foveated rendering“ (`fdFoveation`, 0–1, Standard 0,5 → `XRWebGLLayer.fixedFoveation`; 1,0 = höchste Stufe, die der Browser anbietet; wirkt nicht bei Bloom, da die Szene dann in einen eigenen Puffer geht),
   „Frame rate“ (`fdFrameRate` 72/90/120 Hz, Standard 72 → `updateTargetFrameRate`, nächster unterstützter Wert). XR-Layer entsteht zentral in `makeLayer()`.
   Foveation wird zusätzlich beim Sessionstart als optionalFeature angefordert (`low/medium/high-fixed-foveation-level` je nach Regler).
   Laut Meta wirkt FFR nur, wenn direkt in den XR-Puffer gerendert wird und mitten im Frame kein Render-Ziel gewechselt wird (Bloom → keine Wirkung).
