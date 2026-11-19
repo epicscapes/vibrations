@@ -2,7 +2,7 @@
 // Vanilla WebGL2 + WebXR. Teilt Stimmerkennung/-effekte (audio.js) und VR-Menü (vrmenu.js) mit Soothing Ripples.
 import {
   skyVS, skyFS, terrainVS, terrainFS, ballVS, ballFS, sparkVS, sparkFS,
-  ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS, wingVS, wingFS, WING_FEATHERS, MAX_LIGHTS, compFS, shaftVS, shaftFS, moteVS, moteFS,
+  ringVS, ringFS, ribbonVS, ribbonFS, glowVS, glowFS, wingVS, wingFS, WING_FEATHERS, MAX_LIGHTS, shaftVS, shaftFS, moteVS, moteFS,
 } from './flowshaders.js';
 import { Bloom } from './flowpost.js';
 import { Profiler } from './flowprof.js';
@@ -49,7 +49,6 @@ const SECTIONS = [
     fdCompanion: { label: 'Companion chance', min: 0, max: 1, step: 0.05, def: 0.35 },
     fdMagnet:    { label: 'Companion magnet', min: 0.5, max: 8, step: 0.25, def: 2.5 },
     fdCompBright: { label: 'Companion brightness', min: 0.2, max: 2.5, step: 0.05, def: 1 },
-    fdCompGlass:  { label: 'Companion glass material', toggle: true, def: true },
   }},
   { title: 'Camera', items: {
     fdCam:  { label: 'POV ↔ third person', min: 0, max: 1, step: 0.01, def: 0.75 },
@@ -84,6 +83,7 @@ const SECTIONS = [
   }},
   { title: 'Atmosphere', items: {
     fdAuroraInt: { label: 'Aurora sky', min: 0, max: 2, step: 0.05, def: 1 },
+    fdAurRefl:   { label: 'Aurora in reflections', min: 1, max: 4, step: 0.1, def: 2.5 },
     fdShafts:  { label: 'Light shafts', min: 0, max: 2, step: 0.05, def: 0.5 },
     fdBloom:   { label: 'Bloom (post effect)', toggle: true, def: false },
     fdBloomStr:  { label: 'Bloom strength', min: 0, max: 2, step: 0.05, def: 0.7 },
@@ -156,7 +156,7 @@ function program(vs, fs) {
 const P = {
   sky: program(skyVS, skyFS), terrain: program(terrainVS, terrainFS), ball: program(ballVS, ballFS),
   spark: program(sparkVS, sparkFS), ring: program(ringVS, ringFS), ribbon: program(ribbonVS, ribbonFS),
-  glow: program(glowVS, glowFS), wing: program(wingVS, wingFS), comp: program(ballVS, compFS),
+  glow: program(glowVS, glowFS), wing: program(wingVS, wingFS),
   shaft: program(shaftVS, shaftFS), mote: program(moteVS, moteFS),
 };
 const emptyVao = gl.createVertexArray();
@@ -522,6 +522,7 @@ function updateGoals(dt) {
         const amp = Math.min(-vn / 1.5, 1);
         addHit(ball, dir, amp);
         addHit(B.c, v3.scale(dir, -1), amp);
+        B.c.flashGoal = Math.min(Math.max(B.c.flashGoal || 0, 0.4 + amp), 1);
       }
       if (A.main && -vn > 0.12 && time - (B.c.lastSpark || 0) > 0.15) {
         B.c.lastSpark = time;
@@ -540,13 +541,12 @@ function updateGoals(dt) {
     // Verschwinden (ältester bei mehr als MAX_COMPANIONS): klein skalieren, Licht ausblenden
     if (c.dying) { c.scale -= dt / 1.2; if (c.scale <= 0) { companions.splice(k, 1); continue; } }
     // Schnurr-Vibration: Größe und Helligkeit wackeln leicht (schnelles Zittern × langsames Atmen)
-    const cs = Math.hypot(c.vel[0], c.vel[1]);
-    const rg = Math.min(cs / 2.5, 1);
-    c.ripEnv = rg > (c.ripEnv || 0) ? c.ripEnv + (rg - c.ripEnv) * Math.min(dt * 6, 1) : rg + ((c.ripEnv || 0) - rg) * Math.exp(-dt * 3 / S.fdRipFade);
-    if (cs > 0.05) c.moveDir = [c.vel[0] / cs, c.vel[1] / cs];
-    const purr = Math.sin(time * c.buzz) * (0.6 + 0.4 * Math.sin(time * c.breath + c.phase));
-    c.vis = c.scale * (1 + 0.035 * purr);
-    c.glow = c.bright * (1 + 0.12 * purr) * c.scale;
+    // Aufleuchten nach einem Treffer: schnell an, langsam aus
+    c.flashGoal = (c.flashGoal || 0) * Math.exp(-dt * 1.4);
+    c.flash = (c.flash || 0) + (c.flashGoal - (c.flash || 0)) * Math.min(dt * 25, 1);
+    const purr = (0.65 * Math.sin(time * c.buzz) + 0.35 * Math.sin(time * c.buzz * 0.63 + c.phase)) * (0.6 + 0.4 * Math.sin(time * c.breath + c.phase));
+    c.vis = c.scale * (1 + 0.022 * purr);
+    c.glow = c.bright * (1 + 0.07 * purr) * c.scale * (1 + 2.2 * (c.flash || 0));
   }
   companions.forEach((c, k) => {
     c.pos[1] = terrainH(c.pos[0], c.pos[2]) + c.r * c.scale;
@@ -569,7 +569,7 @@ function spawnCompanion(p) {
     magnet: rr(0.6, 1.4), brake: rr(0.6, 1.4),                        // Bewegung: Zug und Bremsen
     wander: rr(0.3, 1.1), wanderSpeed: rr(0.15, 0.6) * (Math.random() < 0.5 ? -1 : 1),
     jit: [rr(0.4, 1.3), rr(0.4, 1.3), rr(0.3, 1.2)],                    // Schlingern: Tempo x/z, Stärke
-    buzz: rr(55, 80), breath: rr(2.5, 4.0),                           // Vibration (rad/s)
+    buzz: rr(14, 24), breath: rr(1.2, 2.2),                           // Vibration (rad/s)
     scale: 1, vis: 1, glow: 1, dying: false,
   };
   companions.push(c);
@@ -781,6 +781,7 @@ function glassCommon(u, proj, view, cam) {
   gl.uniform1f(u.uRough, S.fdRough);
   gl.uniform1f(u.uFresnel, S.fdBallFresnel);
   gl.uniform1f(u.uAurora, S.fdAuroraInt);
+  gl.uniform1f(u.uAurRefl, S.fdAurRefl);
   gl.uniform1f(u.uRipFreq, S.fdRipFreq);
   gl.uniform1f(u.uRipFade, S.fdRipFade);
   gl.uniform1f(u.uGlit, S.fdSurfGlit);
@@ -811,7 +812,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   // Begleiter: leuchtende Kugeln (deckend)
   mark('companions');
   gl.bindVertexArray(sphereMesh.vao);
-  if (companions.length && S.fdCompGlass) {
+  if (companions.length) {
     // gleiches Glas wie die Hauptkugel, ohne innere Schalen; Innenlicht = Leuchten des Begleiters
     u = P.ball.u;
     gl.useProgram(P.ball.p);
@@ -821,25 +822,9 @@ function drawWorld(proj, view, cam, vpW, vpH) {
     for (const c of companions) {
       gl.uniform1f(u.uHue, hue + c.hue);
       gl.uniform1f(u.uLight, 1.1 * c.glow * S.fdCompBright);
-      const md = c.moveDir || [1, 0];
-      gl.uniform3f(u.uEmit, -md[0], 0, -md[1]);
-      gl.uniform1f(u.uRipple, S.fdRipples * (c.ripEnv || 0));
+      gl.uniform1f(u.uRipple, 0);                 // kein Antriebs-Ripple, nur Treffer
       gl.uniform1f(u.uGlitScale, 40 * c.r);
       hitUniforms(u, c);
-      drawSphere(u, c.pos, c.r * c.vis, c.rot);
-    }
-  } else if (companions.length) {
-    u = P.comp.u;
-    gl.useProgram(P.comp.p);
-    gl.uniformMatrix4fv(u.uProj, false, proj);
-    gl.uniformMatrix4fv(u.uView, false, view);
-    gl.uniform3fv(u.uCam, cam);
-    gl.uniform1f(u.uTime, time);
-    gl.uniform1f(u.uGlit, S.fdSurfGlit);
-    for (const c of companions) {
-      gl.uniform1f(u.uGlitScale, 40 * c.r);
-      gl.uniform1f(u.uHue, hue + c.hue);
-      gl.uniform1f(u.uBright, c.glow * S.fdCompBright);
       drawSphere(u, c.pos, c.r * c.vis, c.rot);
     }
   }
@@ -880,6 +865,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uFresnel, S.fdFresnel);
   gl.uniform1f(u.uSpecRough, S.fdSpecRough);
   gl.uniform1f(u.uAurora, S.fdAuroraInt);
+  gl.uniform1f(u.uAurRefl, S.fdAurRefl);
   lightUniforms(u);
   gl.bindVertexArray(terrainMesh.vao);
   gl.drawElements(gl.TRIANGLES, terrainMesh.count, gl.UNSIGNED_INT, 0);
@@ -895,6 +881,7 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform1f(P.sky.u.uHue, hue);
   gl.uniform1f(P.sky.u.uTime, time);
   gl.uniform1f(P.sky.u.uAurora, S.fdAuroraInt);
+  gl.uniform1f(P.sky.u.uAurRefl, S.fdAurRefl);
   gl.bindVertexArray(fullscreen);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   gl.depthFunc(gl.LESS);

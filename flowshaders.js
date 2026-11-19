@@ -58,6 +58,7 @@ const vec3 FOG      = vec3(0.065, 0.016, 0.07);// Szenen-/Bodennebel
 const SKY_GLSL = `
 uniform float uTime;
 uniform float uAurora;      // Intensität der Aurora (0 = aus, nur Nebelverlauf)
+uniform float uAurRefl;     // Verstärkung der Aurora in Spiegelungen (Boden, Murmel)
 const vec3 SHAFT_DIR = vec3(0.3216, 0.9191, 0.1379);   // = normalize(0.35, 1, 0.15), Richtung der Lichtstrahlen
 vec3 skyColorQ(vec3 dir, float hue, bool detail) {
   float up = dir.y;
@@ -74,7 +75,7 @@ vec3 skyColorQ(vec3 dir, float hue, bool detail) {
   float band = smoothstep(-0.02, 0.12, up) * (1.0 - smoothstep(0.18, 0.55, up)) * (1.0 - smoothstep(0.6, 0.85, dot(dir, SHAFT_DIR)));
   vec3 aur = mix(hueShift(AUR_LOW, hue), hueShift(AUR_HIGH, hue), smoothstep(0.05, 0.5, up));
   float on = min(uAurora, 1.0);
-  vec3 col = hueShift(FOG, hue) * (1.0 + 0.4 * smoothstep(0.0, 0.5, up) * (1.0 - on)) + aur * curtain * band * 0.95 * uAurora;
+  vec3 col = hueShift(FOG, hue) * (1.0 + 0.4 * smoothstep(0.0, 0.5, up) * (1.0 - on)) + aur * curtain * band * 0.95 * uAurora * (detail ? 1.0 : uAurRefl);
   // zum Horizont in den Nebel übergehen -> kein sichtbarer Horizont
   return mix(hueShift(FOG, hue), col, smoothstep(0.0, 0.18, up));
 }
@@ -236,11 +237,14 @@ float surfaceGlitter(vec3 q, float t) {
   vec3 p = q * uGlitScale;
   vec3 cell = floor(p);
   float h = glitHash(cell);
-  if (h > 0.55) return 0.0;                              // nur ein Teil der Zellen hat einen Punkt
-  vec3 c = cell + 0.25 + 0.5 * vec3(glitHash(cell + 1.7), glitHash(cell + 4.1), glitHash(cell + 8.3));
+  vec3 c = cell + 0.3 + 0.4 * vec3(glitHash(cell + 1.7), glitHash(cell + 4.1), glitHash(cell + 8.3));
   float d = length(p - c);
-  float aa = fwidth(d) + 0.02;
-  float dotv = 1.0 - smoothstep(0.0, 0.09 + aa, d);
+  float aa = fwidth(d);                                  // Ableitung vor jeder Verzweigung
+  if (h > 0.55) return 0.0;                              // nur ein Teil der Zellen hat einen Punkt
+  // Radius bleibt immer innerhalb der Zelle (Abstand zur Zellgrenze >= 0,3) -> keine eckigen Kanten;
+  // wird der Punkt kleiner als ein Pixel, wird er schwächer statt größer
+  float rad = 0.05 + min(aa, 0.2);
+  float dotv = (1.0 - smoothstep(rad * 0.3, rad, d)) * min(0.05 / max(aa, 0.05), 1.0);
   float tw = 0.5 + 0.5 * sin(t * (2.0 + h * 9.0) + h * 60.0);
   return dotv * pow(tw, 14.0) * 2.5;                    // sehr kurze Lebenszeit: blitzt auf und verlischt
 }`;
@@ -288,6 +292,7 @@ uniform float uRipFade;    // Ausklingzeit (s) der Treffer-Ripples
 uniform vec3 uHitDir[2];   // Treffer-Ripples: Richtung des Kontaktpunkts (Welt)
 uniform float uHitAge[2];  // Alter (s)
 uniform float uHitAmp[2];  // Stärke (0 = keiner)
+uniform mat3 uRot;
 uniform int uIter;         // Julia-Iterationen (weniger, wenn die Kugel groß im Bild ist)
 in vec3 vObj;
 in vec3 vN;
@@ -391,7 +396,13 @@ void main() {
   col += vec3(1.0, 0.85, 0.95) * pow(max(dot(reflect(-v, nr), l), 0.0), mix(80.0, 12.0, uRough)) * 0.3 * (1.0 - uRough * 0.6);
   float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
   col += mix(hueShift(AUR_LOW, uHue), hueShift(AUR_HIGH, uHue), 0.5) * rim * 0.35 * uFresnel;
-  if (uGlit > 0.0) col += mix(hueShift(GLOW, uHue), vec3(1.0, 0.9, 1.0), 0.5) * surfaceGlitter(vObj, uTime) * uGlit;
+  if (uGlit > 0.0) {
+    // Glitzer auf einer leicht größeren Schale -> schwebt mit etwas Abstand über dem Glas (Parallaxe), dreht mit der Kugel
+    vec3 ro = (uCam - uPos) / uR, rd = -v;
+    float b = dot(ro, rd), hh = b * b - (dot(ro, ro) - 1.04 * 1.04);
+    vec3 qs = hh > 0.0 ? normalize(ro + rd * (-b - sqrt(hh))) : n;
+    col += mix(hueShift(GLOW, uHue), vec3(1.0, 0.9, 1.0), 0.5) * surfaceGlitter(transpose(uRot) * qs, uTime) * uGlit;
+  }
   o = vec4(dither(col), 1.0);
 }`;
 
@@ -795,8 +806,9 @@ void main() {
   // langsamer Aufstieg vom Boden, eigene Phase und Tempo, leichtes Schweben seitlich
   float cyc = 5.0 + 6.0 * r4;
   float t = fract(uTime / cyc + r.z);
-  float rise = 2.6 * t * (0.6 + 0.4 * r.z);
-  xz += vec2(sin(uTime * 0.4 + id), cos(uTime * 0.33 + id * 1.7)) * 0.12 * t;
+  bool stuck = r4 < 0.3;                                             // ~30 % kleben am Boden und funkeln nur
+  float rise = stuck ? 0.0 : 2.6 * t * (0.6 + 0.4 * r.z);
+  if (!stuck) xz += vec2(sin(uTime * 0.4 + id), cos(uTime * 0.33 + id * 1.7)) * 0.12 * t;
   vec3 p = vec3(xz.x, terrainH(xz) + 0.02 + rise, xz.y);
   vec4 vp = uView * vec4(p, 1.0);
   gl_Position = uProj * vp;

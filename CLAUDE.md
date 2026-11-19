@@ -75,12 +75,13 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.22.0)
+## Flow Drift (Stand v0.23.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
   Himmel: Aurora-Schleier rundherum, keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
   Die Schleier sind parallel zur Lichtstrahl-Richtung `SHAFT_DIR` = normalize(0.35, 1, 0.15): Muster hängt nur vom Winkel um diese Achse ab
   → in jeder Blickrichtung dieselbe Schräge wie die Strahlen. Nur über dem Horizont bis etwa 30° Höhe sichtbar, zum Pol weich ausgeblendet (dort liefen Linien zusammen).
   Intensität `fdAuroraInt` (0 = aus, dann nur Nebelverlauf) → `uAurora` in Himmel, Boden-Spiegelung und Murmel.
+  Spiegelungen (`skyColorLite`, Boden + Murmel-Hintergrund) verstärken nur den Aurora-Anteil um `fdAurRefl` (1–4, Standard 2,5); der Himmel selbst bleibt gleich.
   Lichtstrahlen (`fdShafts`, Untermenü „Atmosphere“): wie gestreute Planes in Unreal – zustandsloses Raster 13×13 Zellen à 8 m um den Spieler (Hash: 62 % der Zellen
   haben einen Strahl), schräge Bänder (eine Lichtrichtung), zylindrisch zur Kamera gedreht, additiv, langsam pulsierend + wanderndes Streifen-Noise;
   blenden unten per Nähe-Maske zum Gelände (0–3 m über `terrainH`) und zur Kamera (3–11 m) aus. Jeder Strahl blendet als Ganzes nach seinem Abstand zur
@@ -106,15 +107,17 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Jede Schale hat eine eigene Drehung (`uShellRot[3]`, CPU): gleiche Achse wie die Kugel, Tempo 1 + (1/Radius − 1)·`fdLayerSpin` → kleinere drehen schneller.
   Treffer-Ripples: Stößt ein Begleiter an die Hauptkugel, läuft auf beiden Kugeln ein Wellenpaket vom Kontaktpunkt um die Kugel
   (Front 3 rad/s, Ausklingen über `fdRipFade`, je Kugel die 2 neuesten Treffer: `uHitDir/Age/Amp[2]`, `addHit()`).
-  Glitzerpunkte auf der Oberfläche (`fdSurfGlit`, `GLIT_GLSL`): Zellen im Objektraum (drehen mit), je Zelle ein Punkt, der kurz aufblitzt; Dichte ∝ Radius (`uGlitScale` = 40·r).
+  Glitzerpunkte (`fdSurfGlit`, `GLIT_GLSL`): auf einer Schale r·1,04 (Sichtstrahl geschnitten → schweben mit Parallaxe), im Objektraum (drehen mit), je Zelle ein Punkt,
+  der kurz aufblitzt; Radius bleibt immer innerhalb der Zelle (keine eckigen Kanten), sub-pixel → schwächer statt größer; Dichte ∝ Radius (`uGlitScale` = 40·r).
   Innenlicht, Austritt + Hintergrund-Näherung. Roughness (`fdRough`) macht Inneres/Hintergrund weicher und Glanz breiter.
   (Die Mehrstrahl-Variante „Realistic rays“ aus v0.17 wurde auf Wunsch wieder entfernt.) Fresnel-Saum in Szenenfarbe (`fdBallFresnel`, 0–3).
 - Begleiter (Grundradius 0,12 m, je Kugel 0,75–1,3 ×): leuchtende Kugeln (innen hell Lavendel, zum Rand Glow-Farbton), keine Fraktale, kein Halo-Sprite.
-  Material umschaltbar (`fdCompGlass`, Standard an): gleicher Glas-Shader wie die Hauptkugel ohne innere Schalen, Innenlicht = Leuchten des Begleiters,
-  Antriebs-Ripple auf der Rückseite gegen ihre Bewegungsrichtung (Hüllkurve aus ihrem Tempo, `c.ripEnv`), Treffer-Ripples, Glitzer. Aus = alte Leuchtkugel (mit Glitzer).
+  Material: gleicher Glas-Shader wie die Hauptkugel ohne innere Schalen, Innenlicht = Leuchten des Begleiters, nur Treffer-Ripples (kein Antriebs-Ripple), Glitzer.
+  (Leuchtkugel `compFS` und Schalter `fdCompGlass` wurden entfernt; `compFS` steht noch ungenutzt in flowshaders.js.)
+  Treffer an der Hauptkugel lassen den Begleiter aufleuchten (`c.flash`: schnell an, ~0,7 s Abklingen, bis 3,2× Helligkeit, auch sein Bodenlicht).
   Jede Kugel ist individuell (Zufall beim Entstehen): Größe, Farbton-Versatz (−0,2…0,55), Helligkeit, Zug/Bremsen, eigener wandernder Zielpunkt um die Hauptkugel,
   seitliches Schlingern. Helligkeit `fdCompBright`: gedimmt wird der weißliche Kern kleiner und die Farbe satter (kein Vergrauen), heller wächst der Kern.
-  Von jedem Begleiter steigen ständig ein paar glitzernde Partikel auf (Ringpuffer `motes`, ~7/s, wenig Deckkraft). Schnurr-Vibration: Größe ±3,5 % und Helligkeit ±12 % zittern schnell, moduliert mit langsamem Atmen.
+  Von jedem Begleiter steigen ständig ein paar glitzernde Partikel auf (Ringpuffer `motes`, ~7/s, wenig Deckkraft). Schnurr-Vibration (weich): Größe ±2,2 % und Helligkeit ±7 %, zwei überlagerte Sinus (2–4 Hz), moduliert mit langsamem Atmen.
   Höchstens 3 Begleiter (`MAX_COMPANIONS`, mehr erzeugte Audio-Knacken): kommt ein vierter dazu, schrumpft der älteste in 1,2 s weg, sein Licht blendet mit aus,
   sein Schnurren wird ausgeblendet und abgebaut (`removePurr`).
   Innenlichter (max. 9 Punktlichter `MAX_LIGHTS`) sitzen tief in den Kugeln (Hauptkugel 0,8 r, Begleiter 0,75 r unter der Mitte, dicht über dem Boden)
@@ -136,7 +139,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Richtung/Kamera: Blickrichtung + rechter Stick lenkt; linker Stick dreht die Ansicht um die Kugel. `fdCam` 0 = POV über der Kugel … 1 = Third Person.
   Weltansicht = XR-Ansicht × inverse(Rig); VR-Menü mit lokaler Ansicht.
 - Magische Umgebungspartikel (`fdMotes`, `moteVS/FS`): zustandslos, weltfest in einem 14-m-Bereich um die Kamera gewrappt (Rand ausgeblendet),
-  steigen über 5–11 s vom Boden bis ~2,6 m auf, glitzern, wenig Deckkraft → beim Durchfahren sichtbares Tempo.
+  steigen über 5–11 s vom Boden bis ~2,6 m auf (~30 % kleben am Boden und funkeln nur), glitzern, wenig Deckkraft → beim Durchfahren sichtbares Tempo.
 - Effekte: Partikelpfad (nur am Boden; kleine, scharfe Punkte, die glitzern: `uGlitter` → meist gedämpft, kurze helle Aufblitzer je Partikel), Warp-Ringe (starten klein, wachsen, dicht, dezent), Ribbon (blendet vor der Kamera aus), Goals, Explosionen, Flügel.
   Weiche Schnitte (`SOFT_GLSL`): Ribbon, Ringe, Leucht-Sprites und Flügel blenden analytisch aus, je näher sie Gelände (`terrainH`) oder Hauptkugel kommen
   (kein Tiefenpuffer nötig; Sprites rekonstruieren ihre Pixel-Weltposition über die Kamera-Achsen).
