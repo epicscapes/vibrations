@@ -63,7 +63,7 @@
   <!-- Version: nur hier hochzählen. Jede Version lädt ihre Dateien unter eigener Adresse (?v=…),
        damit der Quest-Browser nach dem Neuladen nicht alte Dateien aus dem Cache nimmt. -->
   <script>
-    const V = '0.25.0';
+    const V = '0.26.0';
     window.VIBRATIONS_VERSION = V;
 
     // Experiences: neue hier eintragen (Modul + Thumbnail). Auswahl per ?exp=<id>.
@@ -71,7 +71,7 @@
       { id: 'ripples', title: 'Soothing Ripples', module: 'main.js', thumb: 'thumbs/soothing-ripples.jpg' },
       { id: 'flow', title: 'Flow Drift', module: 'flowdrift.js', thumb: 'thumbs/flow-drift.jpg' },
     ];
-    const MODULES = ['main.js', 'shaders.js', 'audio.js', 'vrmenu.js', 'mat.js', 'flowdrift.js', 'flowshaders.js', 'flowsound.js', 'flowpost.js', 'flowprof.js', 'flowtrack.js'];
+    const MODULES = ['main.js', 'shaders.js', 'audio.js', 'vrmenu.js', 'mat.js', 'flowdrift.js', 'flowshaders.js', 'flowsound.js', 'flowpost.js', 'flowprof.js', 'flowtrack.js', 'gestures.js'];
 
     const params = new URLSearchParams(location.search);
     const current = EXPERIENCES.find((e) => e.id === params.get('exp')) || EXPERIENCES[0];

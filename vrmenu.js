@@ -122,25 +122,36 @@ export class VRMenu {
   }
 
   // Pro XR-Frame. Gibt true zurück, wenn der rechte Trigger gerade das Menü bedient (dann keine Wellen).
-  update(frame, refSpace, head) {
+  // opts (Handtracking, optional): { handOpen: bool – Menü per Handflächen-Geste offen,
+  //   anchor: [x,y,z] – Position der linken Hand, select: 0..1 – Pinch rechts statt Trigger }
+  update(frame, refSpace, head, opts = {}) {
     let left = null, right = null;
     for (const src of frame.session.inputSources) {
       if (src.handedness === 'left') left = src;
       if (src.handedness === 'right') right = src;
     }
-    // X-Taste (linker Controller, Button 4) schaltet das Menü
-    const xDown = !!(left && left.gamepad && left.gamepad.buttons[4] && left.gamepad.buttons[4].pressed);
-    if (xDown && !this.prevX) { this.open = !this.open; this.dirty = true; this.drag = null; }
-    this.prevX = xDown;
+    if (opts.handOpen !== undefined) {
+      // Hände: Menü folgt der Handflächen-Geste
+      if (opts.handOpen !== this.open) { this.open = opts.handOpen; this.dirty = true; this.drag = null; }
+    } else {
+      // X-Taste (linker Controller, Button 4) schaltet das Menü
+      const xDown = !!(left && left.gamepad && left.gamepad.buttons[4] && left.gamepad.buttons[4].pressed);
+      if (xDown && !this.prevX) { this.open = !this.open; this.dirty = true; this.drag = null; }
+      this.prevX = xDown;
+    }
     this.beam = null;
-    if (!this.open || !left) { this.pose = null; return false; }
+    if (!this.open || (!left && !opts.anchor)) { this.pose = null; return false; }
 
     // Position: über der linken Hand, zum Kopf gedreht
-    const lp = frame.getPose(left.gripSpace || left.targetRaySpace, refSpace);
-    if (!lp) { this.pose = null; return false; }
+    let p = null;
+    if (opts.anchor) p = { x: opts.anchor[0], y: opts.anchor[1], z: opts.anchor[2] };
+    else {
+      const lp = frame.getPose(left.gripSpace || left.targetRaySpace, refSpace);
+      if (lp) p = lp.transform.position;
+    }
+    if (!p) { this.pose = null; return false; }
     if (this.dirty) this.redraw();
-    const p = lp.transform.position;
-    const anchor = [p.x, p.y + 0.07, p.z];
+    const anchor = [p.x, p.y + (opts.anchor ? 0.12 : 0.07), p.z];
     let z = sub(head, anchor); z = norm(z);
     let x = norm(cross([0, 1, 0], z));
     const y = cross(z, x);
@@ -149,14 +160,14 @@ export class VRMenu {
     this.pose = { origin, ax: scale(x, wM), ay: scale(y, hM), x, y, n: z, wM, hM };
 
     // Laserpointer vom rechten Controller
-    if (!right || !right.gamepad) return false;
+    if (!right || (!right.gamepad && opts.select === undefined)) return false;
     const rp = frame.getPose(right.targetRaySpace, refSpace);
     if (!rp) return false;
     const o = [rp.transform.position.x, rp.transform.position.y, rp.transform.position.z];
     const q = rp.transform.orientation;
     const d = [-2 * (q.x * q.z + q.w * q.y), -2 * (q.y * q.z - q.w * q.x), -(1 - 2 * (q.x * q.x + q.y * q.y))];
     const denom = dot(d, z);
-    const trig = right.gamepad.buttons[0] && right.gamepad.buttons[0].value > 0.5;
+    const trig = opts.select !== undefined ? opts.select > (this.prevTrig ? 0.4 : 0.7) : !!(right.gamepad.buttons[0] && right.gamepad.buttons[0].value > 0.5);
     const pressed = trig && !this.prevTrig;
     this.prevTrig = trig;
     let hitPx = null;

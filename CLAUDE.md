@@ -11,7 +11,8 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - **Vanilla WebGL2 + WebXR**, kein Framework (Wunsch des Nutzers: so lange wie sinnvoll ohne Framework).
   Framework erst vorschlagen, wenn z. B. glTF-Modelle, viele Objekte/Szenengraph, Controller-/Hand-Interaktion mit UI oder Physik dazukommen.
 - Reines HTML/JS ohne Build-Schritt. `index.html` = Startseite/Loader (Experience-Auswahl, Import-Map mit Versionen).
-  Gemeinsam: `audio.js` (Summen-Erkennung + Stimmeffekte, von allen Experiences genutzt), `grain-worklet.js`, `vrmenu.js` (VR-Menü), `mat.js` (Matrix-Helfer).
+  Gemeinsam: `audio.js` (Summen-Erkennung + Stimmeffekte, von allen Experiences genutzt), `grain-worklet.js`, `vrmenu.js` (VR-Menü), `mat.js` (Matrix-Helfer),
+  `gestures.js` (Handgesten, reine Logik – bisher nur in Flow Drift genutzt).
   Soothing Ripples: `main.js`, `shaders.js`. Flow Drift: `flowdrift.js`, `flowshaders.js`, `flowsound.js`.
   Jede Experience lädt als eigenes Modul (Seitenwechsel per Reload) – keine Aufräum-Logik zwischen Experiences nötig.
 - Einstellungen aller Experiences in localStorage (`set.<key>`); Stimm-Einstellungen (`volume`, `dry`, `gateThr`, `fx.*`) sind geteilt, Flow-Drift-Schlüssel beginnen mit `fd`.
@@ -75,7 +76,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.24.0)
+## Flow Drift (Stand v0.26.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
   Himmel: Aurora-Schleier rundherum, keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
   Die Schleier sind parallel zur Lichtstrahl-Richtung `SHAFT_DIR` = normalize(0.35, 1, 0.15): Muster hängt nur vom Winkel um diese Achse ab
@@ -137,6 +138,20 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Beide im exakt gleichen Look wie der Pfad (Größe 0,011, glitzernd), eigener Punkt-Puffer `chips`: fliegen weg, leichte Schwerkraft,
   bis zu 2 Abpraller am Boden, bleiben liegen und verglimmen (Kollision 3–6 s, Goals 5–10 s).
 - Goals schweben auf Höhe der Kugelmitte (Gelände + R), Einsammeln bei Abstand < R + 0,12 m.
+- Handtracking (WebXR Hand Input, `optionalFeatures: ['hand-tracking']`, kein SDK):
+  `gestures.js` = reine Logik ohne WebXR/Rendering (Eingabe: 25 Gelenke je Hand im lokalen Raum + Kopf; Ausgabe: Aktionen) →
+  bei einem späteren Umstieg (z. B. Meta Immersive Web SDK) nur den Adapter in `xrFrame` tauschen (liest Gelenke per `frame.fillPoses`).
+  Gesten (alle geglättet, Werte laufen bei Trackingverlust sanft aus):
+  Gas = Om/Gyan-Mudra (Daumen- und Zeigefingerspitze berühren sich, übrige Finger gestreckt/locker): eine Hand 60 %, beide 90 %, Om-Kreise beider Hände berühren sich 100 %.
+  Bremse = Faust (übrige Finger + Zeigefinger eingerollt; Einrollen = Abstand Spitze–Handgelenk / Knöchel–Handgelenk): eine 50 %, beide 100 %, Fäuste aneinander = zusätzliche Dämpfung (`brakeBoost`).
+  Flügel = beide Hände seitlich angehoben (tiefere Hand 0,42–0,62 m unter Kopfhöhe bis 0,15 m darüber) und > ~0,5–0,62 m auseinander (Höhenunterschied erlaubt).
+  Sprung = beide Hände gleichzeitig nach oben schneller als `fdHandJump` (m/s), Hände < 0,45 m auseinander, nicht in Flügelhaltung, 0,8 s Sperre.
+  Lenken = Neigung der Linie zwischen den Händen wie ein Lenkrad (links höher → rechts), Totzone 8°, voll bei 35°, nur in Om- oder Flughaltung; wirkt wie der rechte Stick (zusätzlich zum Blick).
+  Menü = linke Handfläche zum Gesicht drehen und anschauen (0,5 s) → offen, solange sie grob zum Gesicht zeigt (Hysterese); Auswahl per Pinch rechts über den Zeigestrahl der rechten Hand
+  (`vrMenu.update(..., { handOpen, anchor, select })`, Pinch mit Hysterese 0,7/0,4). Solange das Menü offen ist, sind alle Fahrgesten aus.
+  Hände sichtbar als dezente Leuchtpunkte (`fdHandShow`); Punkt zwischen Daumen und Zeigefinger wird mit dem Gas heller, Handfläche glüht beim Bremsen.
+  Menü „Hands“: Gas- und Lenk-Empfindlichkeit, Sprung-Schwelle, Hände anzeigen. Controller und Hände wechseln automatisch (Hand-Eingaben ohne Gamepad-Auswertung).
+  Test der Gestenlogik mit synthetischen Händen per Node (Skript außerhalb des Repos).
 - Richtung/Kamera: Blickrichtung + rechter Stick lenkt; linker Stick dreht die Ansicht um die Kugel. `fdCam` 0 = POV über der Kugel … 1 = Third Person.
   Weltansicht = XR-Ansicht × inverse(Rig); VR-Menü mit lokaler Ansicht.
 - Spuren im Boden wie in Sand (`fdTracks` Stärke, `fdTrackLife` Dauer, `fdTrackEvery` Update jeden 1./2./3. Frame, Standard 2; `flowtrack.js`):

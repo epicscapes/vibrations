@@ -7,11 +7,12 @@ import {
 import { Bloom } from './flowpost.js';
 import { Profiler } from './flowprof.js';
 import { Tracks, TRACK_SIZE, TRACK_RADIUS } from './flowtrack.js';
+import { HandGestures, JOINTS, J } from './gestures.js';
 import { FlowAudio } from './flowsound.js';
 import { HumDetector, VoiceFX, EFFECTS } from './audio.js';
 import { VRMenu } from './vrmenu.js';
 import {
-  mul, translation, rotationY, rotationX, perspective, invert, transformDir,
+  mul, translation, rotationY, rotationX, perspective, invert, transformDir, transformPoint,
   axisAngle3, mul3, orthonormalize3, v3,
 } from './mat.js';
 
@@ -84,6 +85,12 @@ const SECTIONS = [
     fdTrackLife: { label: 'Track duration (s)', min: 1, max: 15, step: 0.5, def: 5 },
     fdTrackEvery: { label: 'Track update', options: [[1, 'Every frame'], [2, 'Every 2nd frame'], [3, 'Every 3rd frame']], def: 2 },
     fdMotes:     { label: 'Ambient sparkles', min: 0, max: 2, step: 0.05, def: 1 },
+  }},
+  { title: 'Hands', items: {
+    fdHandAccel: { label: 'Hand accel sensitivity', min: 0.5, max: 1.5, step: 0.05, def: 1 },
+    fdHandSteer: { label: 'Hand steering sensitivity', min: 0.3, max: 2, step: 0.05, def: 1 },
+    fdHandJump:  { label: 'Hand jump threshold (m/s)', min: 0.6, max: 2, step: 0.05, def: 1.1 },
+    fdHandShow:  { label: 'Show hands', toggle: true, def: true },
   }},
   { title: 'Atmosphere', items: {
     fdAuroraInt: { label: 'Aurora sky', min: 0, max: 2, step: 0.05, def: 1 },
@@ -231,6 +238,12 @@ let headFwd = [0, -1];            // Blickrichtung (xz, Welt)
 let manualHum = false;
 const keys = new Set();
 let stick = [0, 0], turn = 0, trigger = 0, grip = 0;   // grip = Bremse (Grip-Tasten)
+// Handtracking: Gesten (gestures.js) + Gelenke (lokaler Raum) für die Darstellung
+const gestures = new HandGestures();
+const handJoints = { left: null, right: null };
+const jointBuf = { left: new Float32Array(JOINTS * 16), right: new Float32Array(JOINTS * 16) };
+const handPos = { left: new Float32Array(JOINTS * 3), right: new Float32Array(JOINTS * 3) };
+let handOut = null, handAccel = 0, brakeBoost = 0;
 const IDENT3 = () => new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 
 // Zufall mit Saat (Goals sollen bei jedem Start gleich verteilt sein)
@@ -299,7 +312,7 @@ function update(dt) {
   hum.update();
   const keyHum = keys.has('w') || keys.has('arrowup');
   const brake = Math.max(grip, keys.has('s') ? 1 : 0);
-  const goal = Math.max(hum.level, manualHum || keyHum ? 0.7 : 0, trigger * 0.8) * (1 - brake);
+  const goal = Math.max(hum.level, manualHum || keyHum ? 0.7 : 0, trigger * 0.8, handAccel) * (1 - brake);
   propel += (goal - propel) * Math.min(dt * 6, 1);
 
   // Farbton nach Stimmfrequenz; ohne Summen langsam zurück zur Grundfarbe
@@ -332,7 +345,7 @@ function update(dt) {
   const ax = -slope * gx + dir[0] * propel * S.fdThrust;
   const az = -slope * gz + dir[1] * propel * S.fdThrust;
   ball.vel[0] += ax * dt; ball.vel[1] += az * dt;
-  const damp = Math.exp(-(S.fdFriction + brake * 1.6) * dt);          // Bremse: sanft, aber bestimmt
+  const damp = Math.exp(-(S.fdFriction + brake * 1.6 + brakeBoost * 1.2) * dt);          // Bremse: sanft, aber bestimmt
   ball.vel[0] *= damp; ball.vel[1] *= damp;
   let speed = Math.hypot(ball.vel[0], ball.vel[1]);
   if (brake > 0.5 && speed < 0.06) { ball.vel[0] = ball.vel[1] = 0; speed = 0; }
@@ -764,6 +777,30 @@ function uploadGlows() {
     const y = terrainH(g.x, g.z) + R + 0.04 * Math.sin(time * 1.5 + g.phase);
     const pulse = 0.8 + 0.3 * Math.sin(time * 2.2 + g.phase);
     d.set([g.x, y, g.z, g.companion ? 0.6 : 0.45, hue + g.hue, pulse * 0.7, 0.35], k * 7); k++;
+  }
+  // Hände: dezente Gelenkpunkte im Szenenlook; Lichtpunkt zwischen Daumen und Zeigefinger wird mit dem Gas heller,
+  // die Handfläche glüht beim Bremsen in einem anderen Farbton
+  if (S.fdHandShow && xrSession && (handJoints.left || handJoints.right)) {
+    const rig = rigMatrix();
+    const toW = (p) => transformPoint(rig, p);
+    for (const side of ['left', 'right']) {
+      const h = handJoints[side];
+      if (!h) continue;
+      for (let i = 0; i < JOINTS; i++) {
+        const tip = i === 4 || i === 9 || i === 14 || i === 19 || i === 24;
+        const w = toW([h[i * 3], h[i * 3 + 1], h[i * 3 + 2]]);
+        d.set([w[0], w[1], w[2], tip ? 0.016 : 0.011, hue + 0.15, tip ? 0.32 : 0.2, 0.15], k * 7); k++;
+      }
+      const a = handOut && handOut[side];
+      if (a) {
+        const pp = toW(a.pinchPt);
+        d.set([pp[0], pp[1], pp[2], 0.03 + 0.04 * a.om, hue, 0.12 + 0.9 * a.om, 0.4], k * 7); k++;
+        if (a.fist > 0.05) {
+          const pm = toW(a.palm);
+          d.set([pm[0], pm[1], pm[2], 0.07, hue + 0.5, 0.5 * a.fist, 0.5], k * 7); k++;
+        }
+      }
+    }
   }
   gl.bindBuffer(gl.ARRAY_BUFFER, glowBuf.buf);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, d, 0, k * 7);
@@ -1357,7 +1394,7 @@ async function startXR() {
   const fov = S.fdFoveation;
   const ffr = fov >= 0.75 ? 'high-fixed-foveation-level' : fov >= 0.4 ? 'medium-fixed-foveation-level' : fov > 0 ? 'low-fixed-foveation-level' : null;
   let session;
-  try { session = await navigator.xr.requestSession('immersive-vr', ffr ? { optionalFeatures: [ffr] } : {}); }
+  try { session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ffr ? ['hand-tracking', ffr] : ['hand-tracking'] }); }
   catch { session = await navigator.xr.requestSession('immersive-vr'); }
   xrSession = session;
   await gl.makeXRCompatible();
@@ -1365,7 +1402,8 @@ async function startXR() {
   refSpace = await session.requestReferenceSpace('local');
   applyFrameRate();
   session.addEventListener('end', () => {
-    xrSession = null; lastT = 0; trigger = 0; grip = 0; stick = [0, 0]; turn = 0;
+    xrSession = null; lastT = 0; trigger = 0; grip = 0; stick = [0, 0]; turn = 0; handAccel = 0; brakeBoost = 0;
+    handJoints.left = handJoints.right = null; handOut = null; gestures.reset();
     if (previewOn) { previewRunning = true; requestAnimationFrame(previewFrame); }
   });
   session.requestAnimationFrame(xrFrame);
@@ -1384,14 +1422,33 @@ function xrFrame(t, frame) {
   lastT = t;
 
   const hp = pose.transform.position, ho = pose.transform.orientation;
-  const menuBusy = vrMenu.update(frame, refSpace, [hp.x, hp.y, hp.z]);
+
+  // Handtracking: Gelenke lesen (Adapter WebXR -> gestures.js), Gesten auswerten
+  handJoints.left = handJoints.right = null;
+  for (const src of session.inputSources) {
+    if (!src.hand || (src.handedness !== 'left' && src.handedness !== 'right')) continue;
+    const k = src.handedness, m = jointBuf[k];
+    if (!frame.fillPoses || !frame.fillPoses(src.hand.values(), refSpace, m)) continue;
+    const out = handPos[k];
+    for (let i = 0; i < JOINTS; i++) { out[i * 3] = m[i * 16 + 12]; out[i * 3 + 1] = m[i * 16 + 13]; out[i * 3 + 2] = m[i * 16 + 14]; }
+    handJoints[k] = out;
+  }
+  handOut = null;
+  if (handJoints.left || handJoints.right) {
+    handOut = gestures.update(dt, handJoints, { pos: [hp.x, hp.y, hp.z], fwd: fwdOf(ho) },
+      { accelGain: S.fdHandAccel, steerGain: S.fdHandSteer, jumpSpeed: S.fdHandJump });
+  }
+  const menuOpts = handOut && handOut.left
+    ? { handOpen: handOut.menuOpen, anchor: handOut.left.palm, select: handOut.pinchR }
+    : {};
+  const menuBusy = vrMenu.update(frame, refSpace, [hp.x, hp.y, hp.z], menuOpts);
 
   // Controller: rechter Stick lenkt, linker Stick dreht die Ansicht, Trigger = Antrieb (Alternative zum Summen)
   stick = [0, 0]; turn = 0; trigger = 0; grip = 0; jumpPressed = false;
   const hands = {};
   for (const src of session.inputSources) {
     const gp = src.gamepad;
-    if (!gp) continue;
+    if (!gp || src.hand) continue;             // Hände laufen über die Gesten
     // Sprung: A/B (rechts) oder Y (links); X bleibt fürs Menü
     const b = gp.buttons;
     if (b[1]) grip = Math.max(grip, b[1].pressed ? 1 : b[1].value);   // Grip (links oder rechts) = bremsen
@@ -1413,6 +1470,17 @@ function xrFrame(t, frame) {
     const s = Math.min(Math.max((span - 0.95) / 0.3, 0), 1);
     const h = Math.min(Math.max((lowest - (hp.y - 0.75)) / 0.25, 0), 1);
     wingGoal = s * h;
+  }
+
+  // Gesten anwenden (zusätzlich zu Controllern, Summen und Blick)
+  handAccel = 0; brakeBoost = 0;
+  if (handOut) {
+    handAccel = handOut.accel;
+    grip = Math.max(grip, handOut.brake);
+    brakeBoost = handOut.brakeBoost;
+    wingGoal = Math.max(wingGoal, handOut.wing);
+    if (handOut.jump) jumpPressed = true;
+    stick[0] = Math.max(Math.min(stick[0] + handOut.steer, 1.5), -1.5);
   }
 
   // Blickrichtung in Welt: Kopf-Vorwärts (lokal) um die Rig-Drehung gedreht, auf die Ebene projiziert
