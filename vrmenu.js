@@ -158,9 +158,13 @@ export class VRMenu {
     let z = sub(head, anchor); z = norm(z);
     let x = norm(cross([0, 1, 0], z));
     const y = cross(z, x);
-    const wM = W * M_PER_PX, hM = this.canvas.height * M_PER_PX;
+    const mpp = opts.poke !== undefined ? 0.42 / W : M_PER_PX;   // Tippen mit dem Finger: etwas größer (42 cm)
+    const wM = W * mpp, hM = this.canvas.height * mpp;
     const origin = add(anchor, scale(x, -wM / 2));
     this.pose = { origin, ax: scale(x, wM), ay: scale(y, hM), x, y, n: z, wM, hM };
+
+    // Hände: mit der rechten Zeigefingerspitze antippen (Poke) statt Laser
+    if (opts.poke !== undefined) return this.pokeUpdate(opts.poke, origin, x, y, z, mpp);
 
     // Laserpointer vom rechten Controller
     if (!right || (!right.gamepad && opts.select === undefined)) return false;
@@ -179,11 +183,31 @@ export class VRMenu {
       if (t > 0) {
         const hit = add(o, scale(d, t));
         const rel = sub(hit, origin);
-        const u = dot(rel, x) / M_PER_PX, v = this.canvas.height - dot(rel, y) / M_PER_PX;
+        const u = dot(rel, x) / mpp, v = this.canvas.height - dot(rel, y) / mpp;
         const inside = u >= 0 && u <= W && v >= 0 && v <= this.canvas.height;
         if (inside || this.drag) { hitPx = [u, v]; this.beam = { a: o, b: hit }; }
       }
     }
+    return this.interact(hitPx, trig, pressed);
+  }
+
+  // Fingerspitze: Abstand zur Menüebene (Normale zeigt zum Kopf). Davor schweben = Hover, durch die Ebene stoßen = Tippen,
+  // gedrückt halten und seitlich ziehen = Regler. Erst nach dem Zurückziehen (> 1,5 cm) ist der nächste Tipp möglich.
+  pokeUpdate(tip, origin, x, y, z, mpp) {
+    if (!tip) { this.interact(null, false, false); this.pokeDown = false; return false; }
+    const rel = sub(tip, origin);
+    const depth = dot(rel, z);
+    const u = dot(rel, x) / mpp, v = this.canvas.height - dot(rel, y) / mpp;
+    const inside = u >= 0 && u <= W && v >= 0 && v <= this.canvas.height;
+    const down = this.pokeDown ? depth < 0.015 : depth < 0.004 && depth > -0.04;
+    const pressed = down && !this.pokeDown && inside;
+    this.pokeDown = down && (inside || !!this.drag);
+    this.cursor = inside && depth < 0.06 && depth > -0.04 ? add(origin, add(scale(x, u * mpp), scale(y, (this.canvas.height - v) * mpp))) : null;
+    const near = inside && depth < 0.06 && depth > -0.04;
+    return this.interact(near || this.drag ? [u, v] : null, this.pokeDown, pressed);
+  }
+
+  interact(hitPx, trig, pressed) {
     if (!trig) this.drag = null;
     if (!hitPx) { if (this.hover !== -1) { this.hover = -1; this.dirty = true; } return false; }
 

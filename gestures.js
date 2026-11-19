@@ -52,7 +52,7 @@ function analyse(h, isLeft) {
 
 export class HandGestures {
   constructor() {
-    this.s = { accel: 0, brake: 0, brakeBoost: 0, wing: 0, steer: 0, menuHold: 0, menuOpen: false, pinchR: 0 };
+    this.s = { accel: 0, brake: 0, brakeBoost: 0, wing: 0, steer: 0, menuOpen: false, pinchR: 0 };
     this.prevY = { left: null, right: null };
     this.vy = { left: 0, right: 0 };
     this.jumpCool = 0;
@@ -61,7 +61,7 @@ export class HandGestures {
   }
 
   // hands: { left: Float32Array(75) | null, right: ... }, head: { pos, fwd } (lokaler Raum, fwd normiert)
-  // p: { accelGain, steerGain, jumpSpeed, palmMenu (true = Menü per Handflächen-Blick), menuOpen (Menü-Zustand von außen) }
+  // p: { accelGain, steerGain, jumpSpeed, menuOpen (Menü-Zustand von außen: offen = keine Fahrgesten) }
   update(dt, hands, head, p) {
     this.t += dt;
     const s = this.s;
@@ -87,13 +87,7 @@ export class HandGestures {
     };
     out.palmL = palmFacing(L, false);
     out.palmR = palmFacing(R, false);
-    // Optionales Handmenü ohne System-Button: linke Handfläche anschauen (0,5 s) -> offen, solange sie grob zum Gesicht zeigt
-    if (p.palmMenu) {
-      const facing = s.menuOpen ? palmFacing(L, false) : palmFacing(L, true);
-      s.menuHold = facing ? Math.min(s.menuHold + dt, 0.6) : Math.max(s.menuHold - dt * 3, 0);
-      if (!s.menuOpen && s.menuHold >= 0.5) s.menuOpen = true;
-      if (s.menuOpen && s.menuHold <= 0.3) s.menuOpen = false;    // ~0,1 s nach dem Wegdrehen zu
-    } else s.menuOpen = !!p.menuOpen;
+    s.menuOpen = !!p.menuOpen;
     out.menuOpen = s.menuOpen;
     s.pinchR = R ? R.pinch : 0;
     out.pinchR = s.pinchR;

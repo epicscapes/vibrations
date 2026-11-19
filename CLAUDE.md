@@ -76,7 +76,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.27.0)
+## Flow Drift (Stand v0.28.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
   Himmel: Aurora-Schleier rundherum, keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
   Die Schleier sind parallel zur Lichtstrahl-Richtung `SHAFT_DIR` = normalize(0.35, 1, 0.15): Muster hängt nur vom Winkel um diese Achse ab
@@ -130,7 +130,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Flügel: Arme ausbreiten (Hände > ~1,1 m auseinander, etwa Schulterhöhe; Vorschau: F halten) → Federfächer wachsen und schlagen schnell wie ein Kolibri
   (~13 Schläge/s, Farbton läuft schnell über Federn und Länge → chromatisches Schillern, `wingFS`), Kolibri-Brummen an der Kugel (`wings()` in flowsound.js:
   ~45 Hz Dreieck + im Schlagtakt pulsierendes Luftrauschen, binaural, Lautstärke = Goal-Sound-Regler). Kugel schwebt ~1,7 m über dem
-  geglätteten Boden (Feder + sanftes Auf und Ab), folgt den Hügeln weich; in der Luft kein Hangabtrieb, kein Pfad, kein Rollgeräusch.
+  geglätteten Boden (Feder + sanftes Auf und Ab), folgt den Hügeln weich; Schnellstart: Fluggeste in der Luft (z. B. im Sprung) → Flügel öffnen 3× schneller und fangen den Fall ab; in der Luft kein Hangabtrieb, kein Pfad, kein Rollgeräusch.
 - Begleiter-Physik: rollen immer am Boden, magnetisch zur Hauptkugel (Zug ∝ Abstand × (1 + 0,35·Abstand), `fdMagnet`), nahe dran Bremsen relativ zur Hauptkugel;
   unabhängig von Blick/Kamera. Weiche Kollisionen (Hauptkugel schwerer, Rückprall 0,25) mit leisem räumlichem Glas-Klicken.
   Stöße (Begleiter ↔ Hauptkugel und Begleiter untereinander) erzeugen kleine helle Splitter (`sparkChips`, Menge und Tempo nach Stoßstärke, `fdSparks`),
@@ -147,20 +147,19 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Flügel = beide Hände seitlich angehoben (tiefere Hand 0,42–0,62 m unter Kopfhöhe bis 0,15 m darüber) und > ~0,5–0,62 m auseinander (Höhenunterschied erlaubt).
   Sprung = beide Hände gleichzeitig nach oben schneller als `fdHandJump` (m/s), Hände < 0,45 m auseinander, nicht in Flügelhaltung, 0,8 s Sperre.
   Lenken = Neigung der Linie zwischen den Händen wie ein Lenkrad (links höher → rechts), Totzone 8°, voll bei 35°, nur in Om- oder Flughaltung; wirkt wie der rechte Stick (zusätzlich zum Blick).
-  Menü (`fdHandMenu`): Standard „Menu button“ = Quest-eigener Menübutton über der linken Handfläche (Pinch darauf) bzw. ☰ am linken Controller schaltet unser Menü um.
-  Der Button-Index ist nicht genormt → jede neu gedrückte linke Taste außer Pinch (Hand) bzw. Trigger/Grip/Stick/Y (Controller) toggelt; X toggelt vorerst weiter als Ausweich-Taste.
-  Info-Zeile „Last button“ (Display) zeigt die zuletzt gedrückte Taste (Hand/Controller, Index) → auf der Quest prüfen, was ankommt.
+  Menü: linker Button 4 schaltet um = Pinch auf den Quest-Menübutton über der linken Handfläche (Hände) bzw. X (Controller).
+  Info-Zeile „Last button“ (Display) zeigt die zuletzt gedrückte Taste (Hand/Controller, Index).
   Zeigt eine Handfläche zum Gesicht und wird angeschaut (System-Button sichtbar), zählt ihr Pinch nicht als Gas und nicht als Lenk-Freigabe.
-  Option „Look at left palm“: Menü offen, solange die linke Handfläche angeschaut wird (öffnen nach 0,5 s, schließen ~0,1 s nach dem Wegdrehen).
-  Auswahl per Pinch rechts über den Zeigestrahl der rechten Hand (`vrMenu.update(..., { toggle | handOpen, anchor, select })`, Pinch mit Hysterese 0,7/0,4).
+  Bedienung mit Händen: Menü (42 cm breit) schwebt über der linken Hand, Antippen mit der rechten Zeigefingerspitze (`pokeUpdate` in vrmenu.js):
+  Ebene durchstoßen (< 4 mm davor) = Tippen, gedrückt halten + seitlich ziehen = Regler, erneutes Tippen erst nach Zurückziehen (> 1,5 cm); Hover bis 6 cm davor.
+  Controller: weiter Laser + Trigger. (Option „Look at left palm“ wurde auf Wunsch entfernt.)
   Solange das Menü offen ist, sind alle Fahrgesten aus.
   Hände sichtbar als dezente Leuchtpunkte (`fdHandShow`); Punkt zwischen Daumen und Zeigefinger wird mit dem Gas heller, Handfläche glüht beim Bremsen.
   Menü „Hands“: Gas- und Lenk-Empfindlichkeit, Sprung-Schwelle, Hände anzeigen. Controller und Hände wechseln automatisch (Hand-Eingaben ohne Gamepad-Auswertung).
   Test der Gestenlogik mit synthetischen Händen per Node (Skript außerhalb des Repos).
-- Automatische Ansichtsdrehung (`fdAutoTurn`: Off / When steering (Standard) / Follow ball; Winkel `fdAutoTurnAngle`, Standard 30°; `autoTurn()`):
-  „When steering“: länger als 0,8 s in eine Richtung gelenkt (Stick, Handlenkung, Pfeiltasten) → Schwung um den Winkel; „Follow ball“: Bewegungsrichtung weicht
-  > Winkel + 10° von der Ansicht ab (ab 1 m/s, 0,6 s). Schwung statt Snap: f(t) = 1 − (1−t)⁴(1+4t) (ohne Ruck, schnellste Phase bei ¼, weich auslaufend), 30° ≈ 0,5 s.
-  Manuelles Drehen (linker Stick, A/D) hat Vorrang.
+- Kopfneigung dreht die Ansicht (`fdTilt`, Schwelle `fdTiltThr` Standard 7°, Tempo `fdTiltSpeed` Standard 45 °/s; `tiltSteer()`):
+  Roll aus der Kopf-Orientierung (y des Kopf-Rechtsvektors), darüber weich ansteigend (Smoothstep über 12°), geglättet; Kopf nach rechts = Ansicht nach rechts.
+  (Die automatische Ansichtsdrehung per Schwung aus v0.27 wurde auf Wunsch wieder entfernt.)
 - Richtung/Kamera: Blickrichtung + rechter Stick lenkt; linker Stick dreht die Ansicht um die Kugel. `fdCam` 0 = POV über der Kugel … 1 = Third Person.
   Weltansicht = XR-Ansicht × inverse(Rig); VR-Menü mit lokaler Ansicht.
 - Spuren im Boden wie in Sand (`fdTracks` Stärke, `fdTrackLife` Dauer, `fdTrackEvery` Update jeden 1./2./3. Frame, Standard 2; `flowtrack.js`):

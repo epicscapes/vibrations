@@ -55,8 +55,9 @@ const SECTIONS = [
   { title: 'Camera', items: {
     fdCam:  { label: 'POV ↔ third person', min: 0, max: 1, step: 0.01, def: 0.75 },
     fdTurn: { label: 'Turn speed (°/s)', min: 15, max: 150, step: 5, def: 60 },
-    fdAutoTurn: { label: 'Auto view turn', options: [[0, 'Off'], [1, 'When steering'], [2, 'Follow ball']], def: 1 },
-    fdAutoTurnAngle: { label: 'Auto turn angle (°)', min: 15, max: 60, step: 5, def: 30 },
+    fdTilt:      { label: 'Head tilt turns view', toggle: true, def: true },
+    fdTiltThr:   { label: 'Tilt threshold (°)', min: 2, max: 20, step: 1, def: 7 },
+    fdTiltSpeed: { label: 'Tilt turn speed (°/s)', min: 10, max: 120, step: 5, def: 45 },
   }},
   { title: 'Ball', items: {
     fdThrust:   { label: 'Thrust', min: 0.5, max: 12, step: 0.5, def: 4 },
@@ -93,7 +94,6 @@ const SECTIONS = [
     fdHandSteer: { label: 'Hand steering sensitivity', min: 0.3, max: 2, step: 0.05, def: 1 },
     fdHandJump:  { label: 'Hand jump threshold (m/s)', min: 0.6, max: 2, step: 0.05, def: 1.1 },
     fdHandShow:  { label: 'Show hands', toggle: true, def: true },
-    fdHandMenu:  { label: 'Hand menu', options: [[0, 'Menu button (palm pinch)'], [1, 'Look at left palm']], def: 0 },
     fdInput:     { label: 'Last button', info: () => inputText },
   }},
   { title: 'Atmosphere', items: {
@@ -330,7 +330,7 @@ function update(dt) {
   // Ansicht drehen (linker Stick / A, D)
   const kTurn = (keys.has('a') ? 1 : 0) - (keys.has('d') ? 1 : 0);
   yaw += (kTurn - turn) * S.fdTurn * Math.PI / 180 * dt;
-  autoTurn(dt, kTurn - turn);
+  tiltSteer(dt);
 
   // Richtung: Blickrichtung + rechter Stick (bzw. Pfeiltasten)
   const fwd = headFwd;
@@ -406,47 +406,27 @@ function update(dt) {
 }
 
 // Senkrechte Bewegung: Sprung, Schweben mit Flügeln (organisch federnd über den Hügeln), Landung
-// Automatische Ansichtsdrehung: Schwung um einen festen Winkel (wie Snap-Turn, aber fließend: zügig an, weich aus)
-// Auslöser: „When steering“ = länger in eine Richtung gelenkt; „Follow ball“ = Bewegungsrichtung weicht länger von der Ansicht ab.
-const swing = { t: 1, dur: 0.5, from: 0, delta: 0, hold: 0, dir: 0 };
-function autoTurn(dt, manualTurn) {
-  if (swing.t < 1) {
-    swing.t = Math.min(swing.t + dt / swing.dur, 1);
-    // f(t) = 1 − (1−t)⁴(1+4t): startet ohne Ruck, größte Geschwindigkeit schon bei ¼, lang und weich auslaufend
-    const t = swing.t;
-    yaw = swing.from + swing.delta * (1 - Math.pow(1 - t, 4) * (1 + 4 * t));
-    return;
+// Kopfneigung (Roll) dreht die Ansicht: Totzone = Schwelle, darüber weich ansteigend (+12°), geglättet (organisches Ein-/Ausschwingen)
+let headRoll = 0, tiltTurn = 0;
+function tiltSteer(dt) {
+  let goal = 0;
+  if (S.fdTilt && xrSession) {
+    const a = Math.abs(headRoll) * 180 / Math.PI;
+    const t = Math.min(Math.max((a - S.fdTiltThr) / 12, 0), 1);
+    goal = -Math.sign(headRoll) * t * t * (3 - 2 * t);        // Kopf nach rechts geneigt -> nach rechts drehen
   }
-  if (!S.fdAutoTurn || Math.abs(manualTurn) > 0.1) { swing.hold = 0; return; }   // manuelles Drehen hat Vorrang
-  let want = 0;                       // +1 = nach rechts drehen, -1 = nach links
-  if (S.fdAutoTurn === 1) {
-    const st = stick[0] + (keys.has('arrowright') ? 1 : 0) - (keys.has('arrowleft') ? 1 : 0);
-    if (Math.abs(st) > 0.35) want = Math.sign(st);
-  } else {
-    const sp = Math.hypot(ball.vel[0], ball.vel[1]);
-    if (sp > 1) {
-      const vf = [ball.vel[0] / sp, ball.vel[1] / sp];
-      const camF = [-Math.sin(yaw), -Math.cos(yaw)];                        // Vorwärts der Ansicht (Rig) in xz
-      const cross = camF[0] * vf[1] - camF[1] * vf[0];
-      const ang = Math.acos(Math.min(Math.max(camF[0] * vf[0] + camF[1] * vf[1], -1), 1));
-      if (ang > (S.fdAutoTurnAngle + 10) * Math.PI / 180) want = cross > 0 ? 1 : -1;
-    }
-  }
-  if (want !== 0 && want === swing.dir) swing.hold += dt; else { swing.hold = 0; swing.dir = want; }
-  if (swing.hold > (S.fdAutoTurn === 1 ? 0.8 : 0.6)) {
-    swing.from = yaw;
-    swing.delta = -want * S.fdAutoTurnAngle * Math.PI / 180;               // rechts drehen = yaw kleiner (wie linker Stick nach rechts)
-    swing.dur = 0.35 + S.fdAutoTurnAngle / 200;                             // 30° ≈ 0,5 s
-    swing.t = 0; swing.hold = 0;
-  }
+  tiltTurn += (goal - tiltTurn) * Math.min(dt * (Math.abs(goal) > Math.abs(tiltTurn) ? 2.5 : 4), 1);
+  yaw -= tiltTurn * S.fdTiltSpeed * Math.PI / 180 * dt;
 }
 
 function updateVertical(dt) {
   const gh = terrainH(ball.pos[0], ball.pos[2]);
   groundSmooth += (gh - groundSmooth) * Math.min(dt * 1.2, 1);
-  wing += (wingGoal - wing) * Math.min(dt * (wingGoal > wing ? 1.6 : 1.0), 1);
   const floor = gh + R;
   const onGround = ball.pos[1] <= floor + 0.02;
+  // Schnellstart: Fluggeste in der Luft (z. B. im Sprung) -> Flügel öffnen schneller und fangen den Fall ab
+  wing += (wingGoal - wing) * Math.min(dt * (wingGoal > wing ? (onGround ? 1.6 : 5) : 1.0), 1);
+  if (!onGround && wingGoal > 0.3 && ball.vy < 0) ball.vy *= Math.exp(-dt * 4 * wingGoal);
 
   // Sprung (Taste, nur am Boden)
   if (jumpPressed && !jumpPrev && onGround) ball.vy = 4.3;
@@ -1392,7 +1372,7 @@ SECTIONS.forEach((sec, i) => {
 ui.toggle.addEventListener('click', () => ui.panel.classList.toggle('hidden'));
 
 // Für automatische Tests: ?debug=1 macht den Zustand von außen erreichbar
-if (params.get('debug')) window.__fd = { get yaw() { return yaw; }, get prof() { return prof && prof.last; }, ball, goals, companions, chipList, get time() { return time; }, get sound() { return sound; } };
+if (params.get('debug')) window.__fd = { terrainH, get yaw() { return yaw; }, set roll(v) { headRoll = v; }, get prof() { return prof && prof.last; }, ball, goals, companions, chipList, get time() { return time; }, get sound() { return sound; } };
 
 const bloom = new Bloom(gl, program, fullscreen);
 const tracks = new Tracks(gl, program, fullscreen, emptyVao);
@@ -1464,6 +1444,7 @@ function xrFrame(t, frame) {
   lastT = t;
 
   const hp = pose.transform.position, ho = pose.transform.orientation;
+  headRoll = Math.asin(Math.max(Math.min(2 * (ho.x * ho.y + ho.w * ho.z), 1), -1));   // y-Komponente des Kopf-Rechtsvektors
 
   // Handtracking: Gelenke lesen (Adapter WebXR -> gestures.js), Gesten auswerten
   handJoints.left = handJoints.right = null;
@@ -1478,10 +1459,9 @@ function xrFrame(t, frame) {
   handOut = null;
   if (handJoints.left || handJoints.right) {
     handOut = gestures.update(dt, handJoints, { pos: [hp.x, hp.y, hp.z], fwd: fwdOf(ho) },
-      { accelGain: S.fdHandAccel, steerGain: S.fdHandSteer, jumpSpeed: S.fdHandJump, palmMenu: S.fdHandMenu === 1, menuOpen: vrMenu.open });
+      { accelGain: S.fdHandAccel, steerGain: S.fdHandSteer, jumpSpeed: S.fdHandJump, menuOpen: vrMenu.open });
   }
-  // Menü-Taste: System-Menübutton links (Controller ☰ bzw. Pinch auf den Button über der linken Handfläche).
-  // Der Index ist nicht genormt -> jede neu gedrückte linke Taste außer Trigger/Grip/Stick/X/Y; X bleibt vorerst als Ausweich-Taste.
+  // Menü-Taste: links Button 4 = Pinch auf den Quest-Menübutton über der linken Handfläche bzw. X am Controller
   let menuToggle = false;
   for (const src of session.inputSources) {
     const gp = src.gamepad;
@@ -1495,15 +1475,16 @@ function xrFrame(t, frame) {
       if (infoEls.fdInput) infoEls.fdInput.textContent = inputText;
       vrMenu.refreshInfo();
       if (src.handedness !== 'left') return;
-      if (src.hand ? i !== 0 : ![0, 1, 3, 5].includes(i)) menuToggle = true;   // Hand: alles außer Pinch; Controller: ☰ oder X
+      if (i === 4) menuToggle = true;
     });
     btnPrev[key] = now;
   }
   let menuOpts = { toggle: menuToggle };
   if (handOut && handOut.left) {
-    menuOpts = S.fdHandMenu === 1
-      ? { handOpen: handOut.menuOpen, anchor: handOut.left.palm, select: handOut.pinchR }
-      : { toggle: menuToggle, anchor: handOut.left.palm, select: handOut.pinchR };
+    // Menü über der linken Hand, Bedienung durch Antippen mit der rechten Zeigefingerspitze
+    const rt = handJoints.right;
+    menuOpts = { toggle: menuToggle, anchor: handOut.left.palm,
+      poke: rt ? [rt[J.indexTip * 3], rt[J.indexTip * 3 + 1], rt[J.indexTip * 3 + 2]] : null };
   }
   const menuBusy = vrMenu.update(frame, refSpace, [hp.x, hp.y, hp.z], menuOpts);
 
