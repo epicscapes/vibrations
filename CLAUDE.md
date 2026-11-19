@@ -163,6 +163,9 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   „Frame rate“ (`fdFrameRate` 72/90/120 Hz, Standard 72 → `updateTargetFrameRate`, nächster unterstützter Wert). XR-Layer entsteht zentral in `makeLayer()`.
   Foveation wird zusätzlich beim Sessionstart als optionalFeature angefordert (`low/medium/high-fixed-foveation-level` je nach Regler).
   Laut Meta wirkt FFR nur, wenn direkt in den XR-Puffer gerendert wird und mitten im Frame kein Render-Ziel gewechselt wird (Bloom → keine Wirkung).
+  „Reduce peripheral detail“ (`fdPeriph`, Standard an, `centerDetail()` in SKY_GLSL): außerhalb ~25–40° vom Blickzentrum des jeweiligen Auges (`uFwd`)
+  rechnen Himmel (feine Schleier-Schicht) und Gelände (Körnung, Höhenlinien, Spuren, Glanzlicht-Rauheit) weniger; weicher Übergang, Rand liegt in der Linsen-Unschärfe.
+  Headless (SwiftShader) nicht messbar, da dort Verzweigungen voll ausgeführt werden → auf der Quest mit FPS-Zeile / `?profile=1` prüfen.
   „FPS“-Zeile im Display-Menü (Anzeige-Zeile, `info:` in SECTIONS, vrmenu zeichnet sie alle 0,5 s neu): fps / Ziel-Hz · längster Frame · aktiver FFR-Wert („n/a“ = nicht unterstützt).
 - Tests: `?debug=1` legt den Zustand als `window.__fd` offen.
 - Profiling: `?profile=1` misst jeden Render-Abschnitt (sky, terrain, companions, ball, shafts, sparks, motes, goals, ribbon, rings, wings, bloom, menu)

@@ -60,7 +60,7 @@ uniform float uTime;
 uniform float uAurora;      // Intensität der Aurora (0 = aus, nur Nebelverlauf)
 uniform float uAurRefl;     // Verstärkung der Aurora in Spiegelungen (Boden, Murmel)
 const vec3 SHAFT_DIR = vec3(0.3216, 0.9191, 0.1379);   // = normalize(0.35, 1, 0.15), Richtung der Lichtstrahlen
-vec3 skyColorQ(vec3 dir, float hue, bool detail) {
+vec3 skyColorQ(vec3 dir, float hue, float detail, float aurGain) {
   float up = dir.y;
   // Schleier parallel zu den Lichtstrahlen: Muster hängt nur vom Winkel um die Strahlrichtung ab
   // -> in jeder Blickrichtung dieselbe Schräge (Linien laufen wie parallele Strahlen auf ihren Fluchtpunkt zu)
@@ -68,20 +68,27 @@ vec3 skyColorQ(vec3 dir, float hue, bool detail) {
   vec3 by = cross(SHAFT_DIR, bx);
   float ang = atan(dot(dir, bx), dot(dir, by));
   float curtain = 0.55 + 0.45 * sin(ang * 6.0 + uTime * 0.05 + sin(ang * 5.0 + uTime * 0.03) * 1.5);
-  if (detail) curtain *= 0.6 + 0.4 * sin(ang * 21.0 - uTime * 0.08 + sin(ang * 11.0) * 2.0);
+  if (detail > 0.0) curtain *= mix(0.6, 0.6 + 0.4 * sin(ang * 21.0 - uTime * 0.08 + sin(ang * 11.0) * 2.0), detail);
   else curtain *= 0.6;
   curtain = pow(max(curtain, 0.0), 1.4);
   // nur über dem Horizont und etwas höher; zum Pol hin weich aus (dort liefen die Linien zusammen)
   float band = smoothstep(-0.02, 0.12, up) * (1.0 - smoothstep(0.18, 0.55, up)) * (1.0 - smoothstep(0.6, 0.85, dot(dir, SHAFT_DIR)));
   vec3 aur = mix(hueShift(AUR_LOW, hue), hueShift(AUR_HIGH, hue), smoothstep(0.05, 0.5, up));
   float on = min(uAurora, 1.0);
-  vec3 col = hueShift(FOG, hue) * (1.0 + 0.4 * smoothstep(0.0, 0.5, up) * (1.0 - on)) + aur * curtain * band * 0.95 * uAurora * (detail ? 1.0 : uAurRefl);
+  vec3 col = hueShift(FOG, hue) * (1.0 + 0.4 * smoothstep(0.0, 0.5, up) * (1.0 - on)) + aur * curtain * band * 0.95 * uAurora * aurGain;
   // zum Horizont in den Nebel übergehen -> kein sichtbarer Horizont
   return mix(hueShift(FOG, hue), col, smoothstep(0.0, 0.18, up));
 }
-vec3 skyColor(vec3 dir, float hue) { return skyColorQ(dir, hue, true); }
+vec3 skyColor(vec3 dir, float hue) { return skyColorQ(dir, hue, 1.0, 1.0); }
 // günstige Variante für Spiegelungen (Boden, Murmel-Hintergrund): ohne feine Schleier-Schicht
-vec3 skyColorLite(vec3 dir, float hue) { return skyColorQ(dir, hue, false); }`;
+vec3 skyColorLite(vec3 dir, float hue) { return skyColorQ(dir, hue, 0.0, uAurRefl); }
+// Peripheral detail: 1 in der Bildmitte, 0 am Rand (außerhalb ~25–40° vom Blickzentrum), wenn aktiv
+uniform vec3 uFwd;          // Blickrichtung dieses Auges
+uniform float uPeriph;      // 0 = aus, 1 = am Rand weniger Detail
+float centerDetail(vec3 dirToPixel) {
+  if (uPeriph < 0.5) return 1.0;
+  return smoothstep(0.766, 0.906, dot(dirToPixel, uFwd));
+}`;
 
 // ---------- Himmel ----------
 export const skyVS = `#version 300 es
@@ -104,7 +111,7 @@ ${DITHER_GLSL}
 void main() {
   vec4 w = uInvVP * vec4(vNdc, 1.0, 1.0);
   vec3 dir = normalize(w.xyz / w.w - uCam);
-  o = vec4(dither(skyColor(dir, uHue)), 1.0);
+  o = vec4(dither(skyColorQ(dir, uHue, centerDetail(dir), 1.0)), 1.0);
 }`;
 
 // ---------- Gelände: dunkel, leicht glänzend, Innenlichter der Kugeln, Höhennebel ----------
@@ -172,18 +179,19 @@ void main() {
   if (fogAll > 0.997) { o = vec4(dither(fogCol), 1.0); return; }
   vec3 n = terrainN(vWorld.xz);
   vec3 v = (uCam - vWorld) / dist;
+  float detail = centerDetail(-v);              // feine Effekte nur in der Bildmitte (Rand liegt in der Linsen-Unschärfe)
   // feine Körnung als Bump: lässt Glanzlichter funkeln, nimmt mit der Entfernung ab (kein Flimmern)
-  if (uGrain > 0.0 && dist < 10.0) {
+  if (uGrain > 0.0 && dist < 10.0 && detail > 0.0) {
     vec2 q = vWorld.xz * 140.0;
     float e = 0.5;
     float gx = vnoise(q + vec2(e, 0.0)) - vnoise(q - vec2(e, 0.0));
     float gz = vnoise(q + vec2(0.0, e)) - vnoise(q - vec2(0.0, e));
-    n = normalize(n + vec3(gx, 0.0, gz) * uGrain * 0.35 * (1.0 - smoothstep(3.0, 10.0, dist)));
+    n = normalize(n + vec3(gx, 0.0, gz) * uGrain * 0.35 * (1.0 - smoothstep(3.0, 10.0, dist)) * detail);
   }
   // Spuren: Rille als Bump (Normale kippen), leicht abgedunkelt
   float track = 0.0;
   if (uTrackAmt > 0.0) {
-    float tm = 1.0 - smoothstep(uTrackRadius * 0.6, uTrackRadius * 0.95, length(vWorld.xz - uTrackCenter));
+    float tm = (1.0 - smoothstep(uTrackRadius * 0.6, uTrackRadius * 0.95, length(vWorld.xz - uTrackCenter))) * detail;
     if (tm > 0.0) {
       float e = uTrackSize / 512.0 * 1.5;
       float h0 = trackH(vWorld.xz);
@@ -205,9 +213,9 @@ void main() {
   float specNorm = (specExp + 2.0) / 26.0;          // Energie erhalten: breiter = schwächer
   // raue Glanzlichter: Normale zusätzlich mit gröberem Noise streuen
   vec3 rr = r;
-  if (uSpecRough > 0.0) {
+  if (uSpecRough > 0.0 && detail > 0.0) {
     vec2 q = vWorld.xz * 18.0;
-    rr = normalize(r + vec3(vnoise(q) - 0.5, 0.0, vnoise(q + 7.7) - 0.5) * uSpecRough * 0.35);
+    rr = normalize(r + vec3(vnoise(q) - 0.5, 0.0, vnoise(q + 7.7) - 0.5) * uSpecRough * 0.35 * detail);
   }
   for (int i = 0; i < ${MAX_LIGHTS}; i++) {
     if (i >= uLightCount) break;
@@ -226,7 +234,7 @@ void main() {
 
   // leuchtende Höhenlinien, die langsam nach oben wandern: unregelmäßige Abstände (Höhe per Noise verzogen),
   // jede Linie mit eigener Helligkeit, weich; maskiert mit großem, weichem, wanderndem Noise
-  if (uLines > 0.0 && dist < 30.0) {
+  if (uLines > 0.0 && dist < 30.0 && detail > 0.0) {
     vec2 mp = vWorld.xz;
     float warp = vnoise(mp * 0.07 + 3.1) * 1.6 + vnoise(mp * 0.19 - 1.7) * 0.6;
     float hl = (vWorld.y + warp) * 9.0 - uTime * 0.5;
@@ -237,7 +245,7 @@ void main() {
     float line = (1.0 - smoothstep(0.0, w * 2.0 + width, abs(fract(hl) - 0.5) - 0.0)) * bright;
     float mask = vnoise(mp * 0.08 + vec2(uTime * 0.015, -uTime * 0.01)) * 0.65 + vnoise(mp * 0.21 - uTime * 0.025) * 0.35;
     mask = smoothstep(0.45, 0.85, mask);
-    col += hueShift(GLOW, uHue) * line * mask * uLines * 0.12 * (1.0 - smoothstep(10.0, 30.0, dist));
+    col += hueShift(GLOW, uHue) * line * mask * uLines * 0.12 * (1.0 - smoothstep(10.0, 30.0, dist)) * detail;
   }
 
   // Höhennebel (am Boden am dichtesten) + ganz außen vollständig im Nebel (kein Geländerand sichtbar)

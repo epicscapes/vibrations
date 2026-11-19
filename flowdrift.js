@@ -103,6 +103,7 @@ const SECTIONS = [
     // gilt nur für diese Experience und wird nicht gespeichert (jedes Laden startet mit 150 %)
     superSample: { label: 'Supersampling (%)', min: 100, max: 300, step: 10, def: 150, session: true },
     fdFoveation: { label: 'Foveated rendering', min: 0, max: 1, step: 0.05, def: 0.5 },
+    fdPeriph:    { label: 'Reduce peripheral detail', toggle: true, def: true },
     fdFrameRate: { label: 'Frame rate', options: [[72, '72 Hz'], [90, '90 Hz'], [120, '120 Hz']], def: 72 },
     fdFps:       { label: 'FPS', info: () => fpsText },
   }},
@@ -909,6 +910,8 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform1f(u.uLines, S.fdLines);
   gl.uniform1f(u.uFresnel, S.fdFresnel);
   gl.uniform1f(u.uSpecRough, S.fdSpecRough);
+  gl.uniform3f(u.uFwd, -view[2], -view[6], -view[10]);
+  gl.uniform1f(u.uPeriph, S.fdPeriph ? 1 : 0);
   gl.activeTexture(gl.TEXTURE3);
   gl.bindTexture(gl.TEXTURE_2D, tracks.texture);
   gl.activeTexture(gl.TEXTURE0);
@@ -934,6 +937,8 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform1f(P.sky.u.uHue, hue);
   gl.uniform1f(P.sky.u.uTime, time);
   gl.uniform1f(P.sky.u.uAurora, S.fdAuroraInt);
+  gl.uniform3f(P.sky.u.uFwd, -view[2], -view[6], -view[10]);
+  gl.uniform1f(P.sky.u.uPeriph, S.fdPeriph ? 1 : 0);
   gl.uniform1f(P.sky.u.uAurRefl, S.fdAurRefl);
   gl.bindVertexArray(fullscreen);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
