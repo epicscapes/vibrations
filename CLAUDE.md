@@ -75,7 +75,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.20.0)
+## Flow Drift (Stand v0.21.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
   Himmel: Aurora-Schleier rundherum, keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
   Die Schleier sind parallel zur Lichtstrahl-Richtung `SHAFT_DIR` = normalize(0.35, 1, 0.15): Muster hängt nur vom Winkel um diese Achse ab
@@ -98,7 +98,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Höhennebel (am Boden am dichtesten, Szenenfarbe), Geländerand komplett im Nebel.
   Grundfarben `GLOW`/`AUR_*`/`FOG` in `BASE_GLSL` (JS-Kopie `GLOW` in flowdrift.js) – alles per Hue-Shift nach Stimmfrequenz.
 - Level 1 „Rolling Hills“: unendliches Sinus-Hügel-Gelände (`terrainH` identisch in `flowshaders.js` TERRAIN_GLSL und `flowdrift.js` – beide gleich halten),
-  Gitter 180² über 110 m, mitwandernd und auf Zellen gerastet. Weitere Levels: Option `fdLevel` – brauchen eigene Höhenfunktion in JS und GLSL.
+  Gitter 120² über 110 m, nicht-linear (terrainVS: g = 0,45·g + 0,55·g·|g| → Mitte ~0,41 m, Rand ~1,4 m), mitwandernd und auf die Mittel-Rasterweite gerastet. Weitere Levels: Option `fdLevel` – brauchen eigene Höhenfunktion in JS und GLSL.
 - Hauptkugel (r = 0,3 m) = Glasmurmel, im Fragment-Shader verfolgt (deckend, nur Vorderseiten → kein sichtbares Inneres mehr):
   Fresnel-Spiegelung, Brechung (`fdIOR`), Ripples auf der Oberfläche ab der Rückseite (Warp-Austritt, laufen nach vorn):
   Intensität `fdRipples`, Frequenz `fdRipFreq` (Neigung so normiert, dass die Stärke gleich bleibt), Ausklingzeit `fdRipFade` (Hüllkurve `ripEnv`: schnell an, exponentiell aus).
@@ -138,7 +138,14 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Klang (`flowsound.js`, synthetisiert, je Klang eine Methode → später gegen Dateien tauschbar), alles außer Musik binaural (HRTF-PannerNode, Hörer = Kopf):
   Rollen am Auflagepunkt, Chime am Goal, Aufprall bei Landung, Klicken bei Kollisionen, Schnurren je Begleiter.
   Positionen der Schnurr-Quellen werden nur ~25×/s nachgeführt (weniger Automations-Ereignisse). Musik generativ, nicht räumlich, lauter mit Tempo.
-- Depth-Buffer an (XR-Layer `depth: true`), Reihenfolge: Himmel → Gelände → Kugeln (deckend) → additive Effekte.
+- Depth-Buffer an (XR-Layer `depth: true`), Reihenfolge: Kugeln → Gelände → Himmel (Vollbild-Dreieck auf der fernen Ebene, `LEQUAL`) → additive Effekte.
+  So werden verdeckte Pixel gar nicht erst schattiert (Gelände hinter der Kugel, Himmel hinter dem Gelände).
+- Performance (v0.21, Headless-Messung −35 %, Look unverändert):
+  Gelände-Shader rechnet zuerst den Nebel und bricht bei vollständig vernebelten Pixeln ab; Lichter nur bis 12 m (weich ab 9 m);
+  Körnung nur < 10 m, Höhenlinien nur < 30 m; Himmels-Spiegelung von Boden und Murmel-Hintergrund mit `skyColorLite` (ohne feine Schleier-Schicht).
+  Murmel: Julia-Iterationen 22 → 16, je größer die Kugel im Bild (150–600 px Radius, `uIter`).
+  Display-Menü: „Foveated rendering“ (`fdFoveation`, 0–1, Standard 0,5 → `XRWebGLLayer.fixedFoveation`; wirkt nicht bei Bloom, da die Szene dann in einen eigenen Puffer geht),
+  „Frame rate“ (`fdFrameRate` 72/90/120 Hz, Standard 72 → `updateTargetFrameRate`, nächster unterstützter Wert). XR-Layer entsteht zentral in `makeLayer()`.
 - Tests: `?debug=1` legt den Zustand als `window.__fd` offen.
 - Profiling: `?profile=1` misst jeden Render-Abschnitt (sky, terrain, companions, ball, shafts, sparks, motes, goals, ribbon, rings, wings, bloom, menu)
   und die CPU-Teile (update, goals+companions, particles, sound, upload); Mittel über 120 Frames in der Statuszeile und als `PROFILE`-Konsolenzeile

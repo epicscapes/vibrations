@@ -96,6 +96,8 @@ const SECTIONS = [
   { title: 'Display', items: {
     // gilt nur für diese Experience und wird nicht gespeichert (jedes Laden startet mit 150 %)
     superSample: { label: 'Supersampling (%)', min: 100, max: 300, step: 10, def: 150, session: true },
+    fdFoveation: { label: 'Foveated rendering', min: 0, max: 1, step: 0.05, def: 0.5 },
+    fdFrameRate: { label: 'Frame rate', options: [[72, '72 Hz'], [90, '90 Hz'], [120, '120 Hz']], def: 72 },
   }},
 ];
 const S = {};
@@ -174,7 +176,7 @@ function gridMesh(n, m) {
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
   return { vao, count: idx.length };
 }
-const TERRAIN_N = 180, TERRAIN_SIZE = 110;
+const TERRAIN_N = 120, TERRAIN_SIZE = 110;   // nicht-lineares Raster (terrainVS): Mitte ~0,41 m, Rand ~1,4 m
 const terrainMesh = gridMesh(TERRAIN_N, TERRAIN_N);
 const sphereMesh = gridMesh(48, 24);
 const fullscreen = (() => {
@@ -750,44 +752,11 @@ function shellRotData() { for (let k = 0; k < 3; k++) shellRotBuf.set(shellRot[k
 
 function drawWorld(proj, view, cam, vpW, vpH) {
   const pxScale = proj[5] * vpH * 0.5;
+  let u;
 
-  // Himmel: Aurora + Nebel (ohne Tiefe)
-  mark('sky');
-  gl.disable(gl.DEPTH_TEST);
-  gl.depthMask(false);
-  gl.useProgram(P.sky.p);
-  gl.uniformMatrix4fv(P.sky.u.uInvVP, false, invert(mul(proj, view)));
-  gl.uniform3fv(P.sky.u.uCam, cam);
-  gl.uniform1f(P.sky.u.uHue, hue);
-  gl.uniform1f(P.sky.u.uTime, time);
-  gl.uniform1f(P.sky.u.uAurora, S.fdAuroraInt);
-  gl.bindVertexArray(fullscreen);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-  // Gelände (mit Tiefe)
-  mark('terrain');
+  // Deckendes zuerst die Kugeln (nah, verdecken viel), dann Gelände, dann Himmel -> verdeckte Pixel werden nicht schattiert
   gl.enable(gl.DEPTH_TEST);
   gl.depthMask(true);
-  const cell = TERRAIN_SIZE / TERRAIN_N;
-  let u = P.terrain.u;
-  gl.useProgram(P.terrain.p);
-  gl.uniformMatrix4fv(u.uProj, false, proj);
-  gl.uniformMatrix4fv(u.uView, false, view);
-  gl.uniform2f(u.uOrigin, Math.round(ball.pos[0] / cell) * cell, Math.round(ball.pos[2] / cell) * cell);
-  gl.uniform1f(u.uSize, TERRAIN_SIZE);
-  gl.uniform3fv(u.uCam, cam);
-  gl.uniform1f(u.uHue, hue);
-  gl.uniform1f(u.uTime, time);
-  gl.uniform1f(u.uFogDensity, 0.05);
-  gl.uniform1f(u.uGrain, S.fdGrain);
-  gl.uniform1f(u.uLines, S.fdLines);
-  gl.uniform1f(u.uFresnel, S.fdFresnel);
-  gl.uniform1f(u.uSpecRough, S.fdSpecRough);
-  gl.uniform1f(u.uAurora, S.fdAuroraInt);
-  lightUniforms(u);
-  gl.bindVertexArray(terrainMesh.vao);
-  gl.drawElements(gl.TRIANGLES, terrainMesh.count, gl.UNSIGNED_INT, 0);
-
   // Begleiter: leuchtende Kugeln (deckend)
   mark('companions');
   gl.bindVertexArray(sphereMesh.vao);
@@ -823,7 +792,48 @@ function drawWorld(proj, view, cam, vpW, vpH) {
   gl.uniform3f(u.uEmit, -moveDir[0], 0, -moveDir[1]);
   gl.uniform1f(u.uRipple, S.fdRipples * ripEnv);
   gl.uniform1f(u.uRipFreq, S.fdRipFreq);
+  // groß im Bild (POV) -> weniger Fraktal-Iterationen (Linien bleiben, feinste Ausläufer fallen weg)
+  const ballPx = R / Math.max(v3.len(v3.sub(ball.pos, cam)), 0.05) * pxScale;
+  gl.uniform1i(u.uIter, Math.round(22 - 6 * Math.min(Math.max((ballPx - 150) / 450, 0), 1)));
   drawSphere(u, ball.pos, R, ball.rot);
+
+  // Gelände (mit Tiefe)
+  mark('terrain');
+  const cell = 0.45 * TERRAIN_SIZE / TERRAIN_N;   // Rasterweite in der Mitte (Einrasten gegen Flimmern)
+  u = P.terrain.u;
+  gl.useProgram(P.terrain.p);
+  gl.uniformMatrix4fv(u.uProj, false, proj);
+  gl.uniformMatrix4fv(u.uView, false, view);
+  gl.uniform2f(u.uOrigin, Math.round(ball.pos[0] / cell) * cell, Math.round(ball.pos[2] / cell) * cell);
+  gl.uniform1f(u.uSize, TERRAIN_SIZE);
+  gl.uniform3fv(u.uCam, cam);
+  gl.uniform1f(u.uHue, hue);
+  gl.uniform1f(u.uTime, time);
+  gl.uniform1f(u.uFogDensity, 0.05);
+  gl.uniform1f(u.uGrain, S.fdGrain);
+  gl.uniform1f(u.uLines, S.fdLines);
+  gl.uniform1f(u.uFresnel, S.fdFresnel);
+  gl.uniform1f(u.uSpecRough, S.fdSpecRough);
+  gl.uniform1f(u.uAurora, S.fdAuroraInt);
+  lightUniforms(u);
+  gl.bindVertexArray(terrainMesh.vao);
+  gl.drawElements(gl.TRIANGLES, terrainMesh.count, gl.UNSIGNED_INT, 0);
+
+  // Himmel: Aurora + Nebel – zuletzt unter den deckenden Dingen
+  mark('sky');
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.LEQUAL);      // liegt auf der fernen Ebene: nur dort, wo nichts davor gezeichnet wurde
+  gl.depthMask(false);
+  gl.useProgram(P.sky.p);
+  gl.uniformMatrix4fv(P.sky.u.uInvVP, false, invert(mul(proj, view)));
+  gl.uniform3fv(P.sky.u.uCam, cam);
+  gl.uniform1f(P.sky.u.uHue, hue);
+  gl.uniform1f(P.sky.u.uTime, time);
+  gl.uniform1f(P.sky.u.uAurora, S.fdAuroraInt);
+  gl.bindVertexArray(fullscreen);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.depthFunc(gl.LESS);
+
 
   // Leuchtendes: additiv, verdeckt vom Gelände, schreibt keine Tiefe, blendet an Geometrie weich aus
   gl.enable(gl.BLEND);
@@ -1045,12 +1055,31 @@ function decimals(step) { return step >= 1 ? 0 : Math.min(Math.ceil(-Math.log10(
 
 // Supersampling während der VR-Sitzung ändern: Bildpuffer neu anlegen (kurz nach dem letzten Reglerschritt)
 let scaleTimer = null;
+function makeLayer(session) {
+  const native = XRWebGLLayer.getNativeFramebufferScaleFactor(session) || 1;
+  const layer = new XRWebGLLayer(session, gl, { antialias: false, depth: true, framebufferScaleFactor: native * S.superSample / 100 });
+  if ('fixedFoveation' in layer) layer.fixedFoveation = S.fdFoveation;   // Quest: Bildränder mit geringerer Auflösung
+  return layer;
+}
+function applyFoveation() {
+  const layer = xrSession && xrSession.renderState.baseLayer;
+  if (layer && 'fixedFoveation' in layer) layer.fixedFoveation = S.fdFoveation;
+}
+// Bildwiederholrate: gewünschten Wert oder den nächstliegenden unterstützten
+async function applyFrameRate() {
+  const sess = xrSession;
+  if (!sess || !sess.updateTargetFrameRate || !sess.supportedFrameRates) return;
+  const rates = [...sess.supportedFrameRates];
+  if (!rates.length) return;
+  const want = S.fdFrameRate;
+  const rate = rates.reduce((a, b) => (Math.abs(b - want) < Math.abs(a - want) ? b : a));
+  try { await sess.updateTargetFrameRate(rate); ui.status.textContent = `Frame rate: ${rate} Hz`; } catch (e) { ui.status.textContent = `Frame rate not changed: ${e.message || e}`; }
+}
 function applySupersampling() {
   clearTimeout(scaleTimer);
   scaleTimer = setTimeout(() => {
     if (!xrSession) return;
-    const native = XRWebGLLayer.getNativeFramebufferScaleFactor(xrSession) || 1;
-    const layer = new XRWebGLLayer(xrSession, gl, { antialias: false, depth: true, framebufferScaleFactor: native * S.superSample / 100 });
+    const layer = makeLayer(xrSession);
     xrSession.updateRenderState({ baseLayer: layer });
     ui.status.textContent = `XR framebuffer: ${layer.framebufferWidth}×${layer.framebufferHeight} (${S.superSample} %)`;
   }, 350);
@@ -1058,6 +1087,8 @@ function applySupersampling() {
 
 function applySetting(key) {
   if (key === 'superSample') applySupersampling();
+  if (key === 'fdFoveation') applyFoveation();
+  if (key === 'fdFrameRate') applyFrameRate();
   if (key === 'fdGoals' || key === 'fdCompanion') { /* wirkt beim nächsten Nachfüllen */ }
   if (key.startsWith('fdMusic') || key.startsWith('fdRoll') || key.startsWith('fdSfx') || key.startsWith('fdPurr')) applyVolumes();
   if (!fx) return;
@@ -1183,10 +1214,9 @@ async function startXR() {
   const session = await navigator.xr.requestSession('immersive-vr');
   xrSession = session;
   await gl.makeXRCompatible();
-  const native = XRWebGLLayer.getNativeFramebufferScaleFactor(session) || 1;
-  const layer = new XRWebGLLayer(session, gl, { antialias: false, depth: true, framebufferScaleFactor: native * S.superSample / 100 });
-  session.updateRenderState({ baseLayer: layer, depthNear: 0.05, depthFar: 200 });
+  session.updateRenderState({ baseLayer: makeLayer(session), depthNear: 0.05, depthFar: 200 });
   refSpace = await session.requestReferenceSpace('local');
+  applyFrameRate();
   session.addEventListener('end', () => {
     xrSession = null; lastT = 0; trigger = 0; grip = 0; stick = [0, 0]; turn = 0;
     if (previewOn) { previewRunning = true; requestAnimationFrame(previewFrame); }

@@ -59,7 +59,7 @@ const SKY_GLSL = `
 uniform float uTime;
 uniform float uAurora;      // Intensität der Aurora (0 = aus, nur Nebelverlauf)
 const vec3 SHAFT_DIR = vec3(0.3216, 0.9191, 0.1379);   // = normalize(0.35, 1, 0.15), Richtung der Lichtstrahlen
-vec3 skyColor(vec3 dir, float hue) {
+vec3 skyColorQ(vec3 dir, float hue, bool detail) {
   float up = dir.y;
   // Schleier parallel zu den Lichtstrahlen: Muster hängt nur vom Winkel um die Strahlrichtung ab
   // -> in jeder Blickrichtung dieselbe Schräge (Linien laufen wie parallele Strahlen auf ihren Fluchtpunkt zu)
@@ -67,7 +67,8 @@ vec3 skyColor(vec3 dir, float hue) {
   vec3 by = cross(SHAFT_DIR, bx);
   float ang = atan(dot(dir, bx), dot(dir, by));
   float curtain = 0.55 + 0.45 * sin(ang * 6.0 + uTime * 0.05 + sin(ang * 5.0 + uTime * 0.03) * 1.5);
-  curtain *= 0.6 + 0.4 * sin(ang * 21.0 - uTime * 0.08 + sin(ang * 11.0) * 2.0);
+  if (detail) curtain *= 0.6 + 0.4 * sin(ang * 21.0 - uTime * 0.08 + sin(ang * 11.0) * 2.0);
+  else curtain *= 0.6;
   curtain = pow(max(curtain, 0.0), 1.4);
   // nur über dem Horizont und etwas höher; zum Pol hin weich aus (dort liefen die Linien zusammen)
   float band = smoothstep(-0.02, 0.12, up) * (1.0 - smoothstep(0.18, 0.55, up)) * (1.0 - smoothstep(0.6, 0.85, dot(dir, SHAFT_DIR)));
@@ -76,13 +77,17 @@ vec3 skyColor(vec3 dir, float hue) {
   vec3 col = hueShift(FOG, hue) * (1.0 + 0.4 * smoothstep(0.0, 0.5, up) * (1.0 - on)) + aur * curtain * band * 0.95 * uAurora;
   // zum Horizont in den Nebel übergehen -> kein sichtbarer Horizont
   return mix(hueShift(FOG, hue), col, smoothstep(0.0, 0.18, up));
-}`;
+}
+vec3 skyColor(vec3 dir, float hue) { return skyColorQ(dir, hue, true); }
+// günstige Variante für Spiegelungen (Boden, Murmel-Hintergrund): ohne feine Schleier-Schicht
+vec3 skyColorLite(vec3 dir, float hue) { return skyColorQ(dir, hue, false); }`;
 
 // ---------- Himmel ----------
 export const skyVS = `#version 300 es
 in vec2 aPos;
 out vec2 vNdc;
-void main() { vNdc = aPos; gl_Position = vec4(aPos, 0.9999, 1.0); }`;
+void main() { vNdc = aPos; gl_Position = vec4(aPos, 1.0, 1.0); }   // ferne Ebene: zuletzt gezeichnet, nur wo nichts davor ist
+`;
 
 export const skyFS = `#version 300 es
 precision highp float;
@@ -113,7 +118,10 @@ uniform float uSize;
 out vec3 vWorld;
 ${TERRAIN_GLSL}
 void main() {
-  vec2 xz = uOrigin + (aPos - 0.5) * uSize;
+  // nicht-lineares Raster: in der Mitte ~2× dichter als gleichmäßig, am (vernebelten) Rand grob
+  vec2 g = (aPos - 0.5) * 2.0;
+  g = 0.45 * g + 0.55 * sign(g) * g * g;
+  vec2 xz = uOrigin + g * 0.5 * uSize;
   vWorld = vec3(xz.x, terrainH(xz), xz.y);
   gl_Position = uProj * uView * vec4(vWorld, 1.0);
 }`;
@@ -147,11 +155,18 @@ float marble(vec2 p) {
 }
 
 void main() {
-  vec3 n = terrainN(vWorld.xz);
-  vec3 v = normalize(uCam - vWorld);
   float dist = length(uCam - vWorld);
+  float lineW = fwidth(vWorld.y) * 9.0;                 // Ableitung vor allen Verzweigungen
+  // Nebel zuerst: was vollständig im Nebel liegt, braucht keine Beleuchtung
+  float hFactor = exp(-max(vWorld.y + 1.5, 0.0) * 0.45);
+  float fog = clamp(1.0 - exp(-dist * uFogDensity * (0.6 + 1.4 * hFactor)), 0.0, 1.0);
+  float fogAll = 1.0 - (1.0 - fog) * (1.0 - smoothstep(36.0, 52.0, dist));
+  vec3 fogCol = hueShift(FOG, uHue);
+  if (fogAll > 0.997) { o = vec4(dither(fogCol), 1.0); return; }
+  vec3 n = terrainN(vWorld.xz);
+  vec3 v = (uCam - vWorld) / dist;
   // feine Körnung als Bump: lässt Glanzlichter funkeln, nimmt mit der Entfernung ab (kein Flimmern)
-  if (uGrain > 0.0) {
+  if (uGrain > 0.0 && dist < 10.0) {
     vec2 q = vWorld.xz * 140.0;
     float e = 0.5;
     float gx = vnoise(q + vec2(e, 0.0)) - vnoise(q - vec2(e, 0.0));
@@ -163,7 +178,7 @@ void main() {
   vec3 col = vec3(0.006, 0.003, 0.01) * (0.6 + 0.8 * m);
   // Fake-Spiegelung des Himmels (Glanz an flachen Blickwinkeln)
   vec3 r = reflect(-v, n);
-  col += skyColor(r, uHue) * (0.02 + fres * 0.55);
+  col += skyColorLite(r, uHue) * (0.02 + fres * 0.55);
 
   // Innenlichter der Kugeln: diffuses Kontaktlicht + glänzender Lichtstreif zur Kamera (Fake-Spiegelung)
   float specExp = mix(60.0, 3.0, uSpecRough);
@@ -178,11 +193,12 @@ void main() {
     if (i >= uLightCount) break;
     vec3 L = uLightPos[i] - vWorld;
     float d2 = dot(L, L);
+    if (d2 > 144.0) continue;                         // nur in Reichweite (12 m, weich auslaufend)
     vec3 l = L * inversesqrt(d2);
     // Licht sitzt dicht über dem Boden: weich umgreifendes Kontaktlicht statt reinem Lambert
     float diff = clamp(dot(n, l) * 0.6 + 0.4, 0.0, 1.0) / (1.0 + d2 * 2.2);
     float spec = pow(max(dot(rr, l), 0.0), specExp) * specNorm / (1.0 + d2 * 0.25);
-    col += uLightCol[i] * (diff * 0.9 + spec * 0.55 * (0.5 + m));
+    col += uLightCol[i] * (diff * 0.9 + spec * 0.55 * (0.5 + m)) * (1.0 - smoothstep(81.0, 144.0, d2));
   }
 
   // dezenter Fresnel-Saum in Szenenfarbe (Hügelkanten lesbarer)
@@ -190,11 +206,11 @@ void main() {
 
   // leuchtende Höhenlinien, die langsam nach oben wandern: unregelmäßige Abstände (Höhe per Noise verzogen),
   // jede Linie mit eigener Helligkeit, weich; maskiert mit großem, weichem, wanderndem Noise
-  if (uLines > 0.0) {
+  if (uLines > 0.0 && dist < 30.0) {
     vec2 mp = vWorld.xz;
     float warp = vnoise(mp * 0.07 + 3.1) * 1.6 + vnoise(mp * 0.19 - 1.7) * 0.6;
     float hl = (vWorld.y + warp) * 9.0 - uTime * 0.5;
-    float w = fwidth(hl);
+    float w = lineW;
     float id = floor(hl + 0.5);
     float bright = 0.25 + 0.75 * hash12(vec2(id * 0.137, 4.7));          // Helligkeit je Linie
     float width = 0.08 + 0.12 * hash12(vec2(id * 0.311, 9.1));           // Breite je Linie
@@ -204,12 +220,8 @@ void main() {
     col += hueShift(GLOW, uHue) * line * mask * uLines * 0.12 * (1.0 - smoothstep(10.0, 30.0, dist));
   }
 
-  // Höhennebel: am Boden am dichtesten, in der Szenenfarbe
-  float hFactor = exp(-max(vWorld.y + 1.5, 0.0) * 0.45);
-  float fog = 1.0 - exp(-dist * uFogDensity * (0.6 + 1.4 * hFactor));
-  col = mix(col, hueShift(FOG, uHue), clamp(fog, 0.0, 1.0));
-  // ganz außen vollständig im Nebel (kein Rand des Geländes sichtbar)
-  col = mix(col, hueShift(FOG, uHue), smoothstep(36.0, 52.0, dist));
+  // Höhennebel (am Boden am dichtesten) + ganz außen vollständig im Nebel (kein Geländerand sichtbar)
+  col = mix(col, fogCol, fogAll);
   o = vec4(dither(col), 1.0);
 }`;
 
@@ -253,6 +265,7 @@ uniform mat3 uShellRot[3]; // eigene Drehung je Schale (kleinere drehen schnelle
 uniform vec3 uEmit;        // Richtung der Ripple-Quelle (hinten, Welt)
 uniform float uRipple;     // Ripple-Stärke (bereits mit Ausklingzeit geglättet)
 uniform float uRipFreq;    // Ripple-Frequenz
+uniform int uIter;         // Julia-Iterationen (weniger, wenn die Kugel groß im Bild ist)
 in vec3 vObj;
 in vec3 vN;
 in vec3 vWorld;
@@ -264,6 +277,7 @@ ${DITHER_GLSL}
 vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 float julia(vec2 z, vec2 c) {
   for (int i = 0; i < 22; i++) {
+    if (i >= uIter) break;
     z = cmul(z, z) + c;
     float m = dot(z, z);
     if (m > 64.0) return (float(i) + 1.0 - log2(log2(m) * 0.5)) / 22.0;
@@ -282,7 +296,7 @@ float shell(vec3 q, float k, float soft) {
 }
 vec3 background(vec3 d, float soft) {
   vec3 g = hueShift(FOG, uHue) * 0.6 + hueShift(GLOW, uHue) * 0.1 * uLight;   // Boden mit Lichtpfütze
-  vec3 b = d.y < -0.02 ? g : skyColor(d, uHue);
+  vec3 b = d.y < -0.02 ? g : skyColorLite(d, uHue);
   return mix(b, hueShift(FOG, uHue) * 1.4, soft * 0.5);
 }
 // Ein Strahl durch die Murmel: Eintritt (gebrochen), Schalen, Innenlicht, Austritt -> Farbe hinter der Oberfläche
