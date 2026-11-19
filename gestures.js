@@ -61,7 +61,7 @@ export class HandGestures {
   }
 
   // hands: { left: Float32Array(75) | null, right: ... }, head: { pos, fwd } (lokaler Raum, fwd normiert)
-  // p: { accelGain, steerGain, jumpSpeed }
+  // p: { accelGain, steerGain, jumpSpeed, palmMenu (true = Menü per Handflächen-Blick), menuOpen (Menü-Zustand von außen) }
   update(dt, hands, head, p) {
     this.t += dt;
     const s = this.s;
@@ -78,17 +78,22 @@ export class HandGestures {
       } else { this.prevY[k] = null; this.vy[k] = 0; }
     }
 
-    // Handmenü: linke Handfläche zum Gesicht drehen und anschauen (~0,5 s) -> offen, solange sie grob zum Gesicht zeigt
-    let facing = 0;
-    if (L) {
-      const toHead = norm(sub(head.pos, L.palm));
-      const look = dot(head.fwd, norm(sub(L.palm, head.pos)));
-      facing = s.menuOpen ? (dot(L.palmN, toHead) > 0.3 && look > 0.5 ? 1 : 0)       // Hysterese: offen halten ist leichter
-                          : (dot(L.palmN, toHead) > 0.7 && look > 0.8 ? 1 : 0);
-    }
-    s.menuHold = facing ? s.menuHold + dt : Math.max(s.menuHold - dt * 2, 0);
-    if (!s.menuOpen && s.menuHold > 0.5) s.menuOpen = true;
-    if (s.menuOpen && !facing && s.menuHold < 0.3) { s.menuOpen = false; s.menuHold = 0; }
+    // Handfläche zum Gesicht + angeschaut? (Quest zeigt dann seinen Menü-/System-Button; Pinch dort darf kein Gas geben)
+    const palmFacing = (H, tight) => {
+      if (!H) return false;
+      const toHead = norm(sub(head.pos, H.palm));
+      const look = dot(head.fwd, norm(sub(H.palm, head.pos)));
+      return tight ? dot(H.palmN, toHead) > 0.7 && look > 0.8 : dot(H.palmN, toHead) > 0.35 && look > 0.6;
+    };
+    out.palmL = palmFacing(L, false);
+    out.palmR = palmFacing(R, false);
+    // Optionales Handmenü ohne System-Button: linke Handfläche anschauen (0,5 s) -> offen, solange sie grob zum Gesicht zeigt
+    if (p.palmMenu) {
+      const facing = s.menuOpen ? palmFacing(L, false) : palmFacing(L, true);
+      s.menuHold = facing ? Math.min(s.menuHold + dt, 0.6) : Math.max(s.menuHold - dt * 3, 0);
+      if (!s.menuOpen && s.menuHold >= 0.5) s.menuOpen = true;
+      if (s.menuOpen && s.menuHold <= 0.3) s.menuOpen = false;    // ~0,1 s nach dem Wegdrehen zu
+    } else s.menuOpen = !!p.menuOpen;
     out.menuOpen = s.menuOpen;
     s.pinchR = R ? R.pinch : 0;
     out.pinchR = s.pinchR;
@@ -100,7 +105,7 @@ export class HandGestures {
     // Gas: Om-Geste; eine Hand bis 60 %, beide 90 %, berühren sich die Om-Kreise beider Hände: 100 %
     let accel = 0;
     if (drive) {
-      const a = L ? L.om : 0, b = R ? R.om : 0;
+      const a = L && !out.palmL ? L.om : 0, b = R && !out.palmR ? R.om : 0;   // Pinch am System-Button zählt nicht als Gas
       const hi = Math.max(a, b), lo = Math.min(a, b);
       const touch = both ? 1 - sstep(0.04, 0.1, dist(L.pinchPt, R.pinchPt)) : 0;
       accel = 0.6 * hi + 0.3 * lo + 0.1 * lo * touch;
@@ -140,7 +145,8 @@ export class HandGestures {
     // Lenken: Neigung der Linie zwischen den Händen (wie ein Lenkrad); links höher -> rechts herum.
     // Nur in Fahr- (Om-Geste) oder Flughaltung, mit Totzone – entspannte Hände lenken nicht.
     let steer = 0;
-    if (drive && both && (Math.max(L.om, R.om) > 0.4 || s.wing > 0.3)) {
+    const omL = out.palmL ? 0 : L ? L.om : 0, omR = out.palmR ? 0 : R ? R.om : 0;
+    if (drive && both && (Math.max(omL, omR) > 0.4 || s.wing > 0.3)) {
       const horiz = Math.max(Math.hypot(L.palm[0] - R.palm[0], L.palm[2] - R.palm[2]), 0.05);
       const ang = Math.atan2(L.palm[1] - R.palm[1], horiz) * 180 / Math.PI;
       const a = Math.abs(ang);

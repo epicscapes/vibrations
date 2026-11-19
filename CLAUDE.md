@@ -76,7 +76,7 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
 - Browser-Vorschau (beide Experiences): kleines abgerundetes Portal in der Mitte (`?fov=` zum Testen), ohne Supersampling, standardmäßig AUS
   (Button „Enable preview“) – entlastet den Quest-Browser. Gedrückt halten = Summen simulieren.
 
-## Flow Drift (Stand v0.26.0)
+## Flow Drift (Stand v0.27.0)
 - Look nach Unreal-Referenz des Nutzers (Video): sehr dunkel, Magenta/Violett/Indigo, low-key.
   Himmel: Aurora-Schleier rundherum, keine Sterne; zum Horizont im Nebel, kein sichtbarer Horizont (`SKY_GLSL`).
   Die Schleier sind parallel zur Lichtstrahl-Richtung `SHAFT_DIR` = normalize(0.35, 1, 0.15): Muster hängt nur vom Winkel um diese Achse ab
@@ -147,11 +147,20 @@ Neue Experience: in `index.html` in `EXPERIENCES` eintragen (id, Titel, Modul, T
   Flügel = beide Hände seitlich angehoben (tiefere Hand 0,42–0,62 m unter Kopfhöhe bis 0,15 m darüber) und > ~0,5–0,62 m auseinander (Höhenunterschied erlaubt).
   Sprung = beide Hände gleichzeitig nach oben schneller als `fdHandJump` (m/s), Hände < 0,45 m auseinander, nicht in Flügelhaltung, 0,8 s Sperre.
   Lenken = Neigung der Linie zwischen den Händen wie ein Lenkrad (links höher → rechts), Totzone 8°, voll bei 35°, nur in Om- oder Flughaltung; wirkt wie der rechte Stick (zusätzlich zum Blick).
-  Menü = linke Handfläche zum Gesicht drehen und anschauen (0,5 s) → offen, solange sie grob zum Gesicht zeigt (Hysterese); Auswahl per Pinch rechts über den Zeigestrahl der rechten Hand
-  (`vrMenu.update(..., { handOpen, anchor, select })`, Pinch mit Hysterese 0,7/0,4). Solange das Menü offen ist, sind alle Fahrgesten aus.
+  Menü (`fdHandMenu`): Standard „Menu button“ = Quest-eigener Menübutton über der linken Handfläche (Pinch darauf) bzw. ☰ am linken Controller schaltet unser Menü um.
+  Der Button-Index ist nicht genormt → jede neu gedrückte linke Taste außer Pinch (Hand) bzw. Trigger/Grip/Stick/Y (Controller) toggelt; X toggelt vorerst weiter als Ausweich-Taste.
+  Info-Zeile „Last button“ (Display) zeigt die zuletzt gedrückte Taste (Hand/Controller, Index) → auf der Quest prüfen, was ankommt.
+  Zeigt eine Handfläche zum Gesicht und wird angeschaut (System-Button sichtbar), zählt ihr Pinch nicht als Gas und nicht als Lenk-Freigabe.
+  Option „Look at left palm“: Menü offen, solange die linke Handfläche angeschaut wird (öffnen nach 0,5 s, schließen ~0,1 s nach dem Wegdrehen).
+  Auswahl per Pinch rechts über den Zeigestrahl der rechten Hand (`vrMenu.update(..., { toggle | handOpen, anchor, select })`, Pinch mit Hysterese 0,7/0,4).
+  Solange das Menü offen ist, sind alle Fahrgesten aus.
   Hände sichtbar als dezente Leuchtpunkte (`fdHandShow`); Punkt zwischen Daumen und Zeigefinger wird mit dem Gas heller, Handfläche glüht beim Bremsen.
   Menü „Hands“: Gas- und Lenk-Empfindlichkeit, Sprung-Schwelle, Hände anzeigen. Controller und Hände wechseln automatisch (Hand-Eingaben ohne Gamepad-Auswertung).
   Test der Gestenlogik mit synthetischen Händen per Node (Skript außerhalb des Repos).
+- Automatische Ansichtsdrehung (`fdAutoTurn`: Off / When steering (Standard) / Follow ball; Winkel `fdAutoTurnAngle`, Standard 30°; `autoTurn()`):
+  „When steering“: länger als 0,8 s in eine Richtung gelenkt (Stick, Handlenkung, Pfeiltasten) → Schwung um den Winkel; „Follow ball“: Bewegungsrichtung weicht
+  > Winkel + 10° von der Ansicht ab (ab 1 m/s, 0,6 s). Schwung statt Snap: f(t) = 1 − (1−t)⁴(1+4t) (ohne Ruck, schnellste Phase bei ¼, weich auslaufend), 30° ≈ 0,5 s.
+  Manuelles Drehen (linker Stick, A/D) hat Vorrang.
 - Richtung/Kamera: Blickrichtung + rechter Stick lenkt; linker Stick dreht die Ansicht um die Kugel. `fdCam` 0 = POV über der Kugel … 1 = Third Person.
   Weltansicht = XR-Ansicht × inverse(Rig); VR-Menü mit lokaler Ansicht.
 - Spuren im Boden wie in Sand (`fdTracks` Stärke, `fdTrackLife` Dauer, `fdTrackEvery` Update jeden 1./2./3. Frame, Standard 2; `flowtrack.js`):

@@ -122,7 +122,7 @@ export class VRMenu {
   }
 
   // Pro XR-Frame. Gibt true zurück, wenn der rechte Trigger gerade das Menü bedient (dann keine Wellen).
-  // opts (Handtracking, optional): { handOpen: bool – Menü per Handflächen-Geste offen,
+  // opts (optional): { toggle: bool – Menü umschalten (Flanke), handOpen: bool – Menü per Handflächen-Geste offen,
   //   anchor: [x,y,z] – Position der linken Hand, select: 0..1 – Pinch rechts statt Trigger }
   update(frame, refSpace, head, opts = {}) {
     let left = null, right = null;
@@ -130,7 +130,10 @@ export class VRMenu {
       if (src.handedness === 'left') left = src;
       if (src.handedness === 'right') right = src;
     }
-    if (opts.handOpen !== undefined) {
+    if (opts.toggle !== undefined) {
+      // Menü-Taste (System-Menübutton links, Controller oder Hand) – Auswertung beim Aufrufer
+      if (opts.toggle) { this.open = !this.open; this.dirty = true; this.drag = null; }
+    } else if (opts.handOpen !== undefined) {
       // Hände: Menü folgt der Handflächen-Geste
       if (opts.handOpen !== this.open) { this.open = opts.handOpen; this.dirty = true; this.drag = null; }
     } else {
